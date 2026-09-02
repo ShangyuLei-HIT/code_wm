@@ -1,0 +1,42 @@
+cache_dir: null
+device: cuda
+seed: 42
+image_size: 224
+patch_size: 16
+dimensionality_reduction: tsne
+datasets:
+  pusht:
+    env:
+      env_name: swm/PushT-v1
+      history_size: 1
+      frame_skip: 1
+      visualization_mode: grid
+      rotation_steps: 100
+      grid_size: 3
+      default_variation:
+      - agent.start_position
+      variations:
+      - variation:
+          fields: null
+          values: null
+    world_model:
+      model_name: null
+      history_size: 3
+      num_preds: 1
+      proprio_dim: 4
+      action_dim: 2
+      encoding:
+        proprio: 10
+        action: 10
+      predictor:
+        size: small
+        depth: 6
+        heads: 16
+        mlp_dim: 2048
+        dim_head: 64
+        dropout: 0.1
+        emb_dropout: 0.0
+      backbone:
+        name: facebook/dinov3-vits16-pretrain-lvd1689m
+        type: dinov3_vits16
+      checkpoint_path: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat

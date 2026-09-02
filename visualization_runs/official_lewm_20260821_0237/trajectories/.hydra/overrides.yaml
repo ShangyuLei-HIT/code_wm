@@ -1,0 +1,2 @@
+- datasets.pusht_train.dataset.dataset_name=galilai-group/lewm-pusht
+- datasets.pusht_train.world_model.model_name=official_lewm_pusht_compat

@@ -1,0 +1,68 @@
+experiment:
+  name: codebook_quality_rigid_v1
+  root: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/experiments/codebook_quality_rigid_v1
+  base_training_config: /vepfs-mlp2/c20250203/400120/stable-worldmodel/scripts/train/config/vq_lewm_joint_distillation.yaml
+  base_teacher_cache: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/distillation_cache/lewm_pusht_seed3072
+  official_k8192_seed3072_output: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/joint_distillation/lewm_pusht_k8192_seed3072
+
+compute:
+  devices: [0, 1, 2, 3]
+  nproc_per_node: 4
+  global_batch_size: 768
+  batch_size_per_gpu: 192
+  cpu_workers_total: 50
+
+seeds: [3072, 4096]
+split_seed: 3072
+
+evaluation:
+  manifest_dir: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/evaluation_manifests/codebook_quality_rigid_v1
+  selection_seed: 42
+  selection_count: 50
+  test_seed: 4242
+  test_count: 200
+  shard_size: 50
+  selection_video: false
+  heldout_video: false
+  equivalence_margin_percentage_points: 5.0
+
+transform:
+  seed: 20260826
+  translation_scale: 1.0
+  audit_samples: 512
+  source_codebook: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat_codebook_k8192
+  rigid_output: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat_codebook_k8192_rigid_seed20260826
+  rotation_only_output: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat_codebook_k8192_rotation_only_seed20260826
+  translation_only_output: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat_codebook_k8192_translation_only_seed20260826
+
+conditions:
+  k512_original:
+    num_embeddings: 512
+    codebook_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat_codebook
+    transform_mode: none
+  k2048_original:
+    num_embeddings: 2048
+    codebook_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat_codebook_k2048
+    transform_mode: none
+  k8192_original:
+    num_embeddings: 8192
+    codebook_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat_codebook_k8192
+    transform_mode: none
+  k8192_rigid:
+    num_embeddings: 8192
+    codebook_checkpoint: ${transform.rigid_output}
+    transform_mode: rigid
+
+diagnostics:
+  enabled: true
+  trigger_gap_percentage_points: 5.0
+  seed: 3072
+  conditions:
+    k8192_rotation_only:
+      num_embeddings: 8192
+      codebook_checkpoint: ${transform.rotation_only_output}
+      transform_mode: rotation_only
+    k8192_translation_only:
+      num_embeddings: 8192
+      codebook_checkpoint: ${transform.translation_only_output}
+      transform_mode: translation_only

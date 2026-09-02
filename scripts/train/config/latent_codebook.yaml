@@ -1,0 +1,47 @@
+defaults:
+  - launcher: local
+  - _self_
+
+output_model_name: official_lewm_pusht_compat_codebook
+seed: 3072
+
+# Folder containing config.json + weights.pt. Absolute paths are accepted.
+encoder_checkpoint: ${oc.env:STABLEWM_HOME}/checkpoints/official_lewm_pusht_compat
+img_size: 224
+
+data:
+  dataset: galilai-group/lewm-pusht
+  num_steps: 1
+  frameskip: 1
+  max_latents: 262144
+  test_latents: 32768
+  train_split: 0.9
+  extraction_batch_size: 512
+  num_workers: 12
+  prefetch_factor: 2
+  pin_memory: true
+
+codebook:
+  num_embeddings: 512
+  embedding_dim: 192
+  teacher_momentum: 0.99
+  kmeans_init_samples: 65536
+
+optimizer:
+  epochs: 100
+  batch_size: 8192
+  lr: 1.0e-3
+  min_lr: 1.0e-5
+  weight_decay: 0.0
+
+evaluation:
+  batch_size: 8192
+  relative_epsilon: 1.0e-12
+  violin_max_points_per_split: 50000
+  violin_dpi: 180
+
+checkpoint:
+  interval: 10
+  resume: true
+
+device: cuda

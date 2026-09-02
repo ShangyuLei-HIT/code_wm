@@ -1,0 +1,142 @@
+seed: 3072
+
+paths:
+  dataset_cache: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm
+  teacher_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_cube_compat
+  student_init_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_cube_compat
+  codebook_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_cube_compat_codebook_k8192
+  cache_dir: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/distillation_cache/lewm_cube_seed3072
+  output_dir: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/joint_distillation/lewm_cube_k8192_seed3072
+
+data:
+  dataset: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/datasets/quentinll--lewm-cube/cube_single_expert.h5
+  train_split: 0.9
+  split_seed: 3072
+  num_steps: 4
+  frameskip: 5
+  img_size: 224
+  keys_to_load: [pixels, action]
+  cache_batch_size_per_gpu: 384
+  train_batch_size_per_gpu: 192
+  cpu_workers_total: 108
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+
+codebook:
+  num_embeddings: 8192
+  embedding_dim: 192
+  weight_key: teacher.weight
+  topk: 32
+  temperature: 1.0
+  distance_chunk_size: 2048
+
+wm:
+  history_size: 3
+  num_preds: 1
+
+model:
+  _target_: stable_worldmodel.wm.vq_lewm.JointDistillationLeWM
+  embedding_dim: ${codebook.embedding_dim}
+  num_embeddings: ${codebook.num_embeddings}
+  codebook_checkpoint: ${paths.codebook_checkpoint}
+  codebook_weight_key: ${codebook.weight_key}
+  student_encoder:
+    _target_: stable_pretraining.backbone.utils.vit_hf
+    size: tiny
+    patch_size: 14
+    image_size: ${data.img_size}
+    pretrained: false
+    use_mask_token: false
+  predictor:
+    _target_: stable_worldmodel.wm.lewm.module.Predictor
+    num_frames: ${wm.history_size}
+    input_dim: ${codebook.embedding_dim}
+    hidden_dim: ${codebook.embedding_dim}
+    output_dim: ${codebook.embedding_dim}
+    depth: 6
+    heads: 16
+    mlp_dim: 2048
+    dim_head: 64
+    dropout: 0.1
+    emb_dropout: 0.0
+  action_encoder:
+    _target_: stable_worldmodel.wm.lewm.module.Embedder
+    input_dim: 25
+    emb_dim: ${codebook.embedding_dim}
+  projector:
+    _target_: stable_worldmodel.wm.lewm.module.MLP
+    input_dim: ${codebook.embedding_dim}
+    output_dim: ${codebook.embedding_dim}
+    hidden_dim: 2048
+    norm_fn:
+      _target_: torch.nn.BatchNorm1d
+      _partial_: true
+  adapter:
+    _target_: torch.nn.Linear
+    in_features: ${codebook.embedding_dim}
+    out_features: ${codebook.embedding_dim}
+    bias: true
+  pred_proj:
+    _target_: stable_worldmodel.wm.lewm.module.MLP
+    input_dim: ${codebook.embedding_dim}
+    output_dim: ${codebook.embedding_dim}
+    hidden_dim: 2048
+    norm_fn:
+      _target_: torch.nn.BatchNorm1d
+      _partial_: true
+
+loss:
+  prediction_weight: 1.0
+  latent_weight: 1.0
+  soft_kl_weight: 0.1
+
+optimizer:
+  type: AdamW
+  weight_decay: 1.0e-3
+  betas: [0.9, 0.999]
+
+phases:
+  epochs: [4, 10, 2]
+  phase1:
+    warmup_fraction: 0.05
+    encoder_lr: [1.0e-3, 1.0e-4]
+    predictor_lr: [1.0e-3, 1.0e-4]
+  phase2:
+    warmup_fraction: 0.01
+    encoder_lr: [1.0e-4, 1.0e-5]
+    predictor_lr: [1.0e-4, 5.0e-5]
+  phase3:
+    warmup_fraction: 0.0
+    encoder_lr: [1.0e-5, 1.0e-6]
+    predictor_lr: [5.0e-5, 5.0e-6]
+
+trainer:
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  log_every_n_steps: 10
+  resume: auto
+  benchmark: true
+
+gates:
+  phase1_token_agreement: 0.90
+  phase1_perplexity_ratio: 0.80
+  final_token_agreement: 0.95
+  final_perplexity_ratio: 0.80
+  final_prediction_gap_ratio: 0.10
+
+evaluation:
+  enabled: true
+  plan_config: cube
+  result_prefix: cube
+  dataset_name: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/datasets/quentinll--lewm-cube/cube_single_expert.h5
+  num_eval: 50
+  seed: 42
+  selection_video: false
+  stages: [phase1, phase2, final]
+
+smoke:
+  enabled: false
+  train_samples: 1536
+  val_samples: 768
+  batches_per_epoch: 2

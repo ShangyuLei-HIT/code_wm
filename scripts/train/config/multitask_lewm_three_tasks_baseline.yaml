@@ -1,0 +1,121 @@
+seed: 3072
+
+paths:
+  dataset_cache: ${oc.env:STABLEWM_HOME,./.stablewm}
+  # Reuse M2 split indices only; M3 does not consume teacher arrays.
+  multitask_cache_dir: ${paths.dataset_cache}/distillation_cache/pusht_tworoom_cube_fused
+  output_dir: ${paths.dataset_cache}/multitask_baseline/pusht_tworoom_cube_m3_seed3072
+
+tasks:
+  - name: pusht
+    dataset: galilai-group/lewm-pusht
+    frameskip: 5
+    evaluation_dataset: galilai-group/lewm-pusht
+    plan_config: pusht
+  - name: tworoom
+    dataset: ${paths.dataset_cache}/datasets/quentinll--lewm-tworooms/tworoom.h5
+    frameskip: 5
+    evaluation_dataset: ${paths.dataset_cache}/datasets/quentinll--lewm-tworooms/tworoom.h5
+    plan_config: tworoom
+  - name: cube
+    dataset: ${paths.dataset_cache}/datasets/quentinll--lewm-cube/cube_single_expert.h5
+    frameskip: 5
+    evaluation_dataset: ${paths.dataset_cache}/datasets/quentinll--lewm-cube/cube_single_expert.h5
+    plan_config: cube
+
+data:
+  train_fraction: 0.9
+  split_seed: 3072
+  num_steps: 4
+  img_size: 224
+  batch_size_per_task_per_gpu: 96
+  cpu_workers_total: 108
+
+wm:
+  history_size: 3
+  num_preds: 1
+
+model:
+  _target_: stable_worldmodel.wm.vq_lewm.multitask.MultiTaskContinuousLeWM
+  embedding_dim: 192
+  num_tasks: 3
+  encoder:
+    _target_: stable_pretraining.backbone.utils.vit_hf
+    size: tiny
+    patch_size: 14
+    image_size: ${data.img_size}
+    pretrained: false
+    use_mask_token: false
+  predictor:
+    _target_: stable_worldmodel.wm.lewm.module.Predictor
+    num_frames: ${wm.history_size}
+    input_dim: 192
+    hidden_dim: 192
+    output_dim: 192
+    depth: 6
+    heads: 16
+    mlp_dim: 2048
+    dim_head: 64
+    dropout: 0.1
+    emb_dropout: 0.0
+  action_encoder:
+    _target_: stable_worldmodel.wm.vq_lewm.multitask.PaddedActionEncoder
+    input_dim: 25
+    encoder:
+      _target_: stable_worldmodel.wm.lewm.module.Embedder
+      input_dim: 25
+      emb_dim: 192
+  projector:
+    _target_: stable_worldmodel.wm.lewm.module.MLP
+    input_dim: 192
+    output_dim: 192
+    hidden_dim: 2048
+    norm_fn:
+      _target_: torch.nn.BatchNorm1d
+      _partial_: true
+  adapter:
+    _target_: torch.nn.Linear
+    in_features: 192
+    out_features: 192
+    bias: true
+  pred_proj:
+    _target_: stable_worldmodel.wm.lewm.module.MLP
+    input_dim: 192
+    output_dim: 192
+    hidden_dim: 2048
+    norm_fn:
+      _target_: torch.nn.BatchNorm1d
+      _partial_: true
+
+loss:
+  sigreg:
+    weight: 0.09
+    kwargs:
+      knots: 17
+      num_proj: 1024
+
+optimizer:
+  lr: 5.0e-5
+  min_lr: 1.0e-6
+  warmup_fraction: 0.01
+  weight_decay: 1.0e-3
+  betas: [0.9, 0.999]
+
+trainer:
+  epochs: 16
+  gradient_clip_val: 1.0
+  precision: bf16-mixed
+  resume: auto
+
+evaluation:
+  enabled: true
+  num_eval: 50
+  seed: 42
+  video: false
+  devices: [0, 1, 2]
+
+smoke:
+  enabled: false
+  train_samples_per_task: 512
+  validation_samples_per_task: 256
+  batches_per_epoch: 2

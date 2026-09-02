@@ -1,0 +1,189 @@
+seed: 3072
+
+paths:
+  dataset_cache: ${oc.env:STABLEWM_HOME,./.stablewm}
+  alignment_checkpoint: ${paths.dataset_cache}/multitask/pusht_tworoom_cube_alignment.pt
+  fused_codebook_checkpoint: ${paths.dataset_cache}/checkpoints/pusht_tworoom_cube_fused_uot
+  multitask_cache_dir: ${paths.dataset_cache}/distillation_cache/pusht_tworoom_cube_fused
+  output_dir: ${paths.dataset_cache}/multitask_distillation/pusht_tworoom_cube_uot_seed3072
+
+# Ordering is part of the cache contract: 0=PushT reference, then Two-Room, Cube.
+tasks:
+  - name: pusht
+    dataset: galilai-group/lewm-pusht
+    frameskip: 5
+    teacher_checkpoint: ${paths.dataset_cache}/checkpoints/official_lewm_pusht_compat
+    codebook_checkpoint: ${paths.dataset_cache}/checkpoints/official_lewm_pusht_compat_codebook_k8192
+    train_latents: ${paths.dataset_cache}/codebook_runs/official_lewm_pusht_compat_codebook_k8192/latents.pt
+    validation_latents: ${paths.dataset_cache}/codebook_runs/official_lewm_pusht_compat_codebook_k8192/test_latents.pt
+    evaluation_dataset: galilai-group/lewm-pusht
+    plan_config: pusht
+    qe_budget: 0.02
+  - name: tworoom
+    dataset: ${paths.dataset_cache}/datasets/quentinll--lewm-tworooms/tworoom.h5
+    frameskip: 5
+    teacher_checkpoint: ${paths.dataset_cache}/checkpoints/official_lewm_tworooms_compat
+    codebook_checkpoint: ${paths.dataset_cache}/checkpoints/official_lewm_tworooms_compat_codebook_k8192
+    train_latents: ${paths.dataset_cache}/codebook_runs/official_lewm_tworooms_compat_codebook_k8192/latents.pt
+    validation_latents: ${paths.dataset_cache}/codebook_runs/official_lewm_tworooms_compat_codebook_k8192/test_latents.pt
+    evaluation_dataset: ${paths.dataset_cache}/datasets/quentinll--lewm-tworooms/tworoom.h5
+    plan_config: tworoom
+    qe_budget: 0.02
+  - name: cube
+    dataset: ${paths.dataset_cache}/datasets/quentinll--lewm-cube/cube_single_expert.h5
+    frameskip: 5
+    teacher_checkpoint: ${paths.dataset_cache}/checkpoints/official_lewm_cube_compat
+    codebook_checkpoint: ${paths.dataset_cache}/checkpoints/official_lewm_cube_compat_codebook_k8192
+    train_latents: ${paths.dataset_cache}/codebook_runs/official_lewm_cube_compat_codebook_k8192/latents.pt
+    validation_latents: ${paths.dataset_cache}/codebook_runs/official_lewm_cube_compat_codebook_k8192/test_latents.pt
+    evaluation_dataset: ${paths.dataset_cache}/datasets/quentinll--lewm-cube/cube_single_expert.h5
+    plan_config: cube
+    qe_budget: 0.02
+
+alignment:
+  enabled: true
+  reference_task_id: 0
+  source_task_ids: [1, 2]
+  anchors_per_task: 32768
+  num_steps: 1
+  batch_size: 512
+  num_workers: 48
+  train_fraction: 0.9
+  split_seed: 4242
+  device: cuda
+
+fusion:
+  method: uot
+  device: cuda
+  statistics_samples_per_task: 262144
+  assignment_batch_size: 8192
+  codebook_chunk_size: 2048
+  cost: squared_euclidean
+  cost_normalization: median
+  candidate_distance: null
+  qe_budget: 0.02
+  max_iterations: 300
+  tolerance: 1.0e-6
+  search:
+    rho: [0.05, 0.1, 0.2]
+    epsilon: [0.01, 0.03]
+    keep_threshold: [0.5]
+    mass_threshold: [0.5]
+    radius_threshold: [1.0]
+    ward_threshold: [1.0]
+
+data:
+  train_fraction: 0.9
+  split_seed: 3072
+  num_steps: 4
+  img_size: 224
+  cache_batch_size_per_gpu: 192
+  batch_size_per_task_per_gpu: 96
+  cpu_workers_total: 108
+
+codebook:
+  embedding_dim: 192
+  weight_key: teacher.weight
+  topk: 32
+  temperature: 1.0
+  distance_chunk_size: 2048
+
+wm:
+  history_size: 3
+  num_preds: 1
+
+model:
+  _target_: stable_worldmodel.wm.vq_lewm.multitask.MultiTaskJointDistillationLeWM
+  embedding_dim: ${codebook.embedding_dim}
+  num_tasks: 3
+  codebook_checkpoint: ${paths.fused_codebook_checkpoint}
+  codebook_weight_key: ${codebook.weight_key}
+  student_encoder:
+    _target_: stable_pretraining.backbone.utils.vit_hf
+    size: tiny
+    patch_size: 14
+    image_size: ${data.img_size}
+    pretrained: false
+    use_mask_token: false
+  predictor:
+    _target_: stable_worldmodel.wm.lewm.module.Predictor
+    num_frames: ${wm.history_size}
+    input_dim: ${codebook.embedding_dim}
+    hidden_dim: ${codebook.embedding_dim}
+    output_dim: ${codebook.embedding_dim}
+    depth: 6
+    heads: 16
+    mlp_dim: 2048
+    dim_head: 64
+    dropout: 0.1
+    emb_dropout: 0.0
+  action_encoder:
+    _target_: stable_worldmodel.wm.vq_lewm.multitask.PaddedActionEncoder
+    input_dim: 25
+    encoder:
+      _target_: stable_worldmodel.wm.lewm.module.Embedder
+      input_dim: 25
+      emb_dim: ${codebook.embedding_dim}
+  projector:
+    _target_: stable_worldmodel.wm.lewm.module.MLP
+    input_dim: ${codebook.embedding_dim}
+    output_dim: ${codebook.embedding_dim}
+    hidden_dim: 2048
+    norm_fn:
+      _target_: torch.nn.BatchNorm1d
+      _partial_: true
+  adapter:
+    _target_: torch.nn.Linear
+    in_features: ${codebook.embedding_dim}
+    out_features: ${codebook.embedding_dim}
+    bias: true
+  pred_proj:
+    _target_: stable_worldmodel.wm.lewm.module.MLP
+    input_dim: ${codebook.embedding_dim}
+    output_dim: ${codebook.embedding_dim}
+    hidden_dim: 2048
+    norm_fn:
+      _target_: torch.nn.BatchNorm1d
+      _partial_: true
+
+loss:
+  prediction_weight: 1.0
+  latent_weight: 1.0
+  token_weight: 0.1
+
+optimizer:
+  weight_decay: 1.0e-3
+  betas: [0.9, 0.999]
+
+phases:
+  epochs: [4, 10, 2]
+  phase1:
+    warmup_fraction: 0.05
+    encoder_lr: [1.0e-3, 1.0e-4]
+    predictor_lr: [1.0e-4, 1.0e-5]
+  phase2:
+    warmup_fraction: 0.01
+    encoder_lr: [1.0e-4, 1.0e-5]
+    predictor_lr: [1.0e-4, 5.0e-5]
+  phase3:
+    warmup_fraction: 0.0
+    encoder_lr: [1.0e-5, 1.0e-6]
+    predictor_lr: [5.0e-5, 5.0e-6]
+
+trainer:
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  resume: auto
+
+evaluation:
+  enabled: true
+  num_eval: 50
+  seed: 42
+  video: false
+  devices: [0, 1, 2]
+
+smoke:
+  enabled: false
+  train_samples_per_task: 512
+  validation_samples_per_task: 256
+  batches_per_epoch: 2

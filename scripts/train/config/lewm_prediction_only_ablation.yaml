@@ -1,0 +1,29 @@
+defaults:
+  - lewm
+  - _self_
+
+output_model_name: ablations/lewm_pusht_prediction_only_seed3072_40ep
+subdir: ablations/lewm_pusht_prediction_only_seed3072_40ep/training
+resume_from: null
+
+seed: 3072
+num_workers: 10
+
+trainer:
+  max_epochs: 40
+  devices: 1
+  accelerator: gpu
+  precision: bf16
+  gradient_clip_val: 1.0
+  enable_progress_bar: false
+  log_every_n_steps: 50
+
+loss:
+  sigreg:
+    weight: 0.0
+
+checkpoint:
+  epoch_interval: 10
+
+wandb:
+  enabled: false

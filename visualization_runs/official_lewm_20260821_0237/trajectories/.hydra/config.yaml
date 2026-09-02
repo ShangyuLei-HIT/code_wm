@@ -1,0 +1,22 @@
+datasets:
+  pusht_train:
+    world_model:
+      model_name: official_lewm_pusht_compat
+      history_size: 3
+      num_preds: 1
+      backbone_only: false
+      encoding: {}
+    dataset:
+      dataset_name: galilai-group/lewm-pusht
+      batch_size: 32
+      num_workers: 8
+      n_trajectories: 4
+      n_steps: ${eval:'${..world_model.num_preds} + ${..world_model.history_size}'}
+    dataset_group: pusht
+device: cuda
+seed: 42
+image_size: 224
+patch_size: 14
+frameskip: 5
+cache_dir: null
+dimensionality_reduction: pca

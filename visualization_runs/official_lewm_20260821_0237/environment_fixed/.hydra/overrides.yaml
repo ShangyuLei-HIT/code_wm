@@ -1,0 +1,4 @@
+- ~datasets.two_room
+- ~datasets.ogbench_cube
+- +datasets.pusht.world_model.checkpoint_path=/vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat
+- datasets.pusht.world_model.encoding={}
