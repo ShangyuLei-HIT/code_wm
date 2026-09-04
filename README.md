@@ -2,7 +2,7 @@
 
 > **经验整合与统一隐空间**:多任务世界模型不应靠把所有任务塞进一次端到端优化来获得;表征学习与隐空间塑造应当能够逐任务、可控地进行,已有模型的经验应当以可对齐、可组合的形式被新模型继承。
 
-单任务世界模型易于训练,但当多个任务共享同一模型、同一隐空间与同一优化目标时,任务间干扰会导致性能严重失衡。本项目提出一条区别于端到端单体训练的扩展路径:不直接联合训练一个易受任务干扰的多任务模型,而是将单任务专家的隐空间离线缓存为教师表示并离散化为冻结码本,用其作为学生表示的几何约束;在此基础上用 Similarity Procrustes 把各专家的隐空间与码本统一到一个坐标系,再通过渐进式蒸馏将多个专家的能力整合进一个共享模型。三种实例化在 PushT 与 Two-Room 的双任务设置下,将原生连续多任务训练 6% / 98% 的严重失衡纠正为 90.7% / 84.0% ;任务数扩展到 3 个时（增加Cube任务）,失衡由4% / 92% / 60%）纠正为90.3% / 85.3% / 65.3% 。平均提升幅度为双任务 35.3pp、三任务 28.0pp。
+单任务世界模型易于训练,但当多个任务共享同一模型、同一隐空间与同一优化目标时,任务间干扰会导致性能严重失衡。本项目提出一条区别于端到端单体训练的扩展路径:不直接联合训练一个易受任务干扰的多任务模型,而是将单任务专家的隐空间表示离线缓存为教师表示并离散化为冻结码本,用其作为学生表示的几何约束;在此基础上用 Similarity Procrustes 把各专家的隐空间与码本统一到一个坐标系,再通过渐进式蒸馏将多个专家的能力整合进一个共享模型。三种实例化在 PushT 与 Two-Room 的双任务设置下,将原生连续多任务训练 6% / 98% 的严重失衡纠正为 90.7% / 84.0% ;任务数扩展到 3 个时（增加Cube任务）,失衡由4% / 92% / 60%）纠正为90.3% / 85.3% / 65.3% 。平均提升幅度为双任务 35.3pp、三任务 28.0pp。
 
 ---
 
@@ -12,10 +12,10 @@
 2. **连续版:整合可以是正项。** 双任务 PushT 94%,高于其教师专家的 90%;宏平均 90%,高于教师宏平均 88%。任务数从 2 扩展到 3 时,连续版已有任务持平(94/86),混合版上升(90→92、84→86)。这是正向规模迹象(positive scaling trend);2→3 个任务不足以确立 scaling law。
 3. **离散版:整合零损失,损失全部来自量化。** 三任务下,连续版宏平均(81.3%)与三个连续教师的宏平均一致,离散版(76.7%)与三个离散专家的宏平均一致;连续减离散的差距(4.6pp)与专家层离散化的成本(81.3%−76.7%)一致。共享模型完整继承了监督源的水平,误差来自连续→离散的量化近似,不来自整合过程。
 4. **隐空间坐标对齐是独立的收益来源。** M0 与 M2 的唯一差异是 Procrustes 对齐:双任务宏平均 80%→87%(+7pp),三任务 77.3%→82.0%(+4.7pp);收益集中于量化最困难的 PushT。对齐保持 token 分配 100% 不变。
-5. **离线量化精度不能预测闭环性能。** 码本从 K512 扩到 K8192,测试量化误差下降 58.76%;held-out 成功率却始终集中在 74%–76%,三组配对比较的 90% 置信区间均跨越零点。
+5. **码本质量是否影响模型质量,由训练目标的教师表示形式决定:教师表示全离散时,码本质量直接决定模型质量。** 把三项损失的教师表示全部换成码本向量 c_{y^T}(全离散目标)后,PushT held-out 成功率随码本容量单调上升:K512 17.5% → K2048 30.5% → K8192 62.0%,相邻差距约 3σ 与 7σ;纯码本轨迹的一步预测误差与成功率严格同序——量化误差直接进入学习目标并逐级放大。此前的混合目标(第一项以连续向量为目标)中三者集中在 74%–76%、不可分辨:连续目标缓冲了量化误差。该影响是任务相关的,Cube 在 K2048 后即接近上限;码本大小须按任务在闭环中实测。
 6. **推理时强制离散化不可行,训练时联合适配可行。** 对连续模型直接量化,成功率从 90% 降至 58%;递归量化进一步降至 24%;在训练阶段联合适配冻结码本可恢复至 78%。作为对照,无教师监督、无防坍塌正则的 prediction-only 训练把预测误差降至近零,成功率却只有 3.5%。
 
-> **探索性结果的定位**:UOT 码本融合(零合并)与隐空间刚体变换(+4.5pp,置信区间跨零)均为单 seed 探索,不构成主要主张,见实验部分末尾两节。
+> **探索性结果的定位**:UOT 码本融合(零合并)为单 seed 探索;隐空间刚体变换 +4.5pp 的点估计未能在全离散重训中复现(−6.5pp,不显著),亦作为单 seed 线索,见实验部分末尾两节。
 
 ---
 
@@ -96,17 +96,20 @@ K8192 的量化误差最低,但有 1212 个码字在验证集中从未被激活:
 
 ![强制量化与联合蒸馏对比](docs/assets/k8192_joint_distillation/pusht_success_rate_comparison.png)
 
-### 码本精度不预测闭环性能(200 个 held-out 起点)
+### 全离散训练下,码本质量决定闭环性能(200 个 held-out 起点)
 
-| 条件 | 测试绝对 L2 | Held-out 成功率 |
+把单任务蒸馏三项损失(表示对齐、软 token、动力学预测)的教师表示全部替换为冻结码本向量 c_{y^T}(多任务实验中 M5 的离散实例化用于单任务),在 PushT 与 Cube 上重跑全部码本系列(8 条件;协议与 P1/C1 一致:seed 3072、16 epochs 三阶段、global batch 768)。设计动机来自此前混合目标版本的阴性结果——三档码本集中在 74%–76%、差异不可分辨,首要解释假设是"连续目标缓冲了量化误差":
+
+| 条件(全离散) | 测试绝对 L2 | Held-out 成功率 |
 |---|---:|---:|
-| K512  | 6.8794 | 75.5% |
-| K2048 | 4.4187 | 74.0% |
-| K8192 | 2.8373 | 76.0% |
+| K512  | 6.8794 | 17.5% |
+| K2048 | 4.4187 | 30.5% |
+| K8192 | 2.8373 | **62.0%** |
+| K8192 rigid | 2.8373(距离保持) | 55.5% |
 
-量化误差跨越约 2.4 倍的范围,闭环成功率却几无变化;三组配对比较的 90% 置信区间均跨越零点。
+假设得到确认:量化误差 2.4 倍的差异不再被缓冲,held-out 成功率拉开 44.5pp,K512→K2048→K8192 相邻差距约 3σ 与 7σ;50 起点阶段评测在每个训练阶段上同样单调(20%/38%/62%)。传导机制可直接观测:学生对各自码本目标的拟合程度相同(token agreement ≥0.97,目标 MSE 无系统性差异)——小码本的失败不是欠拟合,而是离散目标本身丢失了状态信息;纯码本轨迹的一步预测误差(pred_teacher_mse 0.0836/0.0761/0.0616)与成功率严格同序,量化误差进入学习目标后逐级放大为动力学误差与任务失败。该影响是任务相关的:Cube 上影响被压缩(K512/K2048/K8192 = 54%/64%/70%),K2048 起即接近任务上限;刚体变换版与原 K8192 几何等价,两个任务上差异均不显著。
 
-![held-out 成功率与配对置信区间](docs/assets/codebook_quality_rigid/heldout_success_and_paired_ci.png)
+完整机制分析与复现入口见[码本质量对比报告](docs/k512_k8192_codebook_quality_comparison_report.md)。
 
 ### 双任务:整合优于原生,连续版反超专家(每任务 50 个固定起点)
 
@@ -179,7 +182,7 @@ K8192 的量化误差最低,但有 1212 个码字在验证集中从未被激活:
 
 即变换只改换坐标系,不改变任何 token 分配与码本几何。
 
-**结果。** 200 个 held-out PushT 起点上,刚体变换版成功率 80.5%,原始版 76.0%,差值 +4.5pp;90% 配对置信区间 [−0.5, +9.5],未达到预注册的 ±5pp 判定阈值(Holm p = 0.56),证据不足。该比较即上节配对置信区间图中的第二组。
+**结果。** 200 个 held-out PushT 起点上,刚体变换版成功率 80.5%,原始版 76.0%,差值 +4.5pp;90% 配对置信区间 [−0.5, +9.5],未达到预注册的 ±5pp 判定阈值(Holm p = 0.56),证据不足。后续在全离散目标下重跑该对照:刚体变换版 55.5% vs 原始版 62.0%(−6.5pp,不显著),+4.5pp 的点估计未能在新目标下复现。
 
 **解读。** 点估计提示:量化分配不变时,闭环性能仍可能随坐标系的选取而变化;若这一现象成立,说明隐空间的整体朝向是世界模型闭环行为的一个自由度,与"隐空间塑造"的主题直接相关。但当前证据不足(单 seed、区间跨零),本结果仅作为机制线索。系统性的变换、共轭与归一化实验计划发展为独立研究(latent gauge sensitivity),不纳入本工作主要主张。
 
@@ -192,7 +195,7 @@ K8192 的量化误差最低,但有 1212 个码字在验证集中从未被激活:
 - M2/M3 的 world size、global batch 与 optimizer step 数并不严格一致,故二者差异应视为强现象,而非严格的单因素因果估计。
 - **prediction-only 消融同时移除了码本监督、连续教师 MSE 与 SIGReg**:它证明的是缺少教师监督与防坍塌约束的纯预测目标会失败,尚不能把收益单独归因于码本本身。
 - **UOT 接受的合并对数为 0(双/三任务一致)**,最终均为对齐拼接码本(K16384/K24576),任务 token 支持完全分离(双任务 I(token;task)=1.000 bit)——已验证"对齐后的多码本蒸馏有效",未验证"跨任务概念合并"。
-- **隐空间刚体变换的 +4.5pp 为单 seed 点估计**,置信区间跨越零点([−0.5, +9.5]),仅作为坐标系敏感性的机制线索(见开放探索二)。
+- **隐空间刚体变换的 +4.5pp 为单 seed 点估计**,置信区间跨越零点([−0.5, +9.5]);全离散重训中该差异未复现(55.5% vs 62.0%,−6.5pp 不显著),仅作为坐标系敏感性的机制线索(见开放探索二)。
 
 ---
 
@@ -208,8 +211,10 @@ scripts/train/build_multitask_fused_codebook.py  # concat / 顺序 UOT 码本融
 scripts/train/multitask_vq_lewm_distillation.py  # 多任务共享模型蒸馏 (M0 / M2 / M4 / M5)
 scripts/train/multitask_lewm_baseline.py         # 原生连续多任务基线 (M3)
 scripts/train/create_rigid_codebook.py           # 刚体仿射变换消融
+scripts/train/run_single_task_fully_discrete_gpu0123.sh  # 全离散单任务 K8192 (PushT/Cube + held-out)
+scripts/train/run_fully_discrete_codebook_series.py      # 全离散码本系列 (K512/K2048/K8192-rigid × PushT/Cube)
 ```
 
 关键配置:双任务 `scripts/train/config/multitask_vq_lewm_*.yaml`(M0/M2/M4/M5);三任务 `scripts/train/config/multitask_vq_lewm_three_tasks*.yaml` 与 `multitask_lewm_three_tasks_baseline.yaml`(M3)。三种监督实例化通过 `latent_target` / `prediction_source` / `token_weight` 三个开关切换,复用同一融合码本与蒸馏缓存。
 
-双/三任务完整实验报告见 [`docs/pusht_tworoom_alignment_codebook_fusion_results.md`](docs/pusht_tworoom_alignment_codebook_fusion_results.md) 与 [`docs/pusht_tworoom_cube_alignment_codebook_fusion_results.md`](docs/pusht_tworoom_cube_alignment_codebook_fusion_results.md),码本质量与刚体变换实验报告见 [`docs/codebook_quality_and_rigid_transform_experiment_report.md`](docs/codebook_quality_and_rigid_transform_experiment_report.md)。
+双/三任务完整实验报告见 [`docs/pusht_tworoom_alignment_codebook_fusion_results.md`](docs/pusht_tworoom_alignment_codebook_fusion_results.md) 与 [`docs/pusht_tworoom_cube_alignment_codebook_fusion_results.md`](docs/pusht_tworoom_cube_alignment_codebook_fusion_results.md),码本质量与刚体变换实验报告见 [`docs/codebook_quality_and_rigid_transform_experiment_report.md`](docs/codebook_quality_and_rigid_transform_experiment_report.md),全离散码本系列与离线量化对比报告见 [`docs/k512_k8192_codebook_quality_comparison_report.md`](docs/k512_k8192_codebook_quality_comparison_report.md)。

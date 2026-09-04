@@ -240,23 +240,60 @@ class JointObjective(nn.Module):
         self.temperature = float(cfg.codebook.temperature)
         self.chunk_size = int(cfg.codebook.distance_chunk_size)
         self.latent_transform = latent_transform
+        # Teacher-representation knobs (defaults reproduce the original
+        # single-task recipe exactly, mirroring MultiTaskObjective):
+        #   latent_target: 'continuous' -> MSE against z^T = E_T(o); 'codebook'
+        #     -> MSE against the quantized code c_{y^T}.
+        #   prediction_source: 'codebook' -> teacher-forcing mixes in c_{y^T};
+        #     'continuous' -> teacher-forcing mixes in z^T.
+        # The soft-KL term is skipped entirely when its weight is zero.
+        self.latent_target = str(cfg.loss.get('latent_target', 'continuous'))
+        self.prediction_source = str(
+            cfg.loss.get('prediction_source', 'codebook')
+        )
+        self.soft_kl_weight = float(cfg.loss.get('soft_kl_weight', 0.1))
+        if self.latent_target not in ('continuous', 'codebook'):
+            raise ValueError(
+                f'loss.latent_target must be continuous|codebook, '
+                f'got {self.latent_target}'
+            )
+        if self.prediction_source not in ('continuous', 'codebook'):
+            raise ValueError(
+                f'loss.prediction_source must be continuous|codebook, '
+                f'got {self.prediction_source}'
+            )
 
     def forward(self, batch: dict[str, torch.Tensor], alpha: float):
         student = self.model.encode_student(batch['pixels'])
         teacher_continuous = batch['teacher_latent'].float()
         if self.latent_transform is not None:
             teacher_continuous = self.latent_transform(teacher_continuous)
-        latent_loss = F.mse_loss(student.float(), teacher_continuous)
-        soft_kl = sparse_topk_kl(
-            student,
-            self.model.codebook,
-            batch['topk_indices'],
-            batch['topk_probs'],
-            temperature=self.temperature,
-            codebook_chunk_size=self.chunk_size,
+        teacher_code = None
+        if (
+            self.latent_target == 'codebook'
+            or self.prediction_source == 'codebook'
+        ):
+            teacher_code = self.model.lookup_teacher_codes(batch['hard_tokens'])
+        if self.latent_target == 'codebook':
+            latent_loss = F.mse_loss(student.float(), teacher_code.float())
+        else:
+            latent_loss = F.mse_loss(student.float(), teacher_continuous)
+        if self.soft_kl_weight > 0.0:
+            soft_kl = sparse_topk_kl(
+                student,
+                self.model.codebook,
+                batch['topk_indices'],
+                batch['topk_probs'],
+                temperature=self.temperature,
+                codebook_chunk_size=self.chunk_size,
+            )
+        else:
+            soft_kl = student.new_zeros(())
+        pred_teacher = (
+            teacher_code if self.prediction_source == 'codebook'
+            else teacher_continuous
         )
-        teacher_code = self.model.lookup_teacher_codes(batch['hard_tokens'])
-        mixed, mask = sequence_teacher_forcing(student, teacher_code, alpha)
+        mixed, mask = sequence_teacher_forcing(student, pred_teacher, alpha)
         prediction = self.model.predict(
             mixed[:, : self.history_size],
             batch['action'][:, : self.history_size],
@@ -539,7 +576,7 @@ def validate(model, loader, cfg, alpha, device, latent_transform=None):
     model.eval()
     dim = int(cfg.codebook.embedding_dim)
     k = int(cfg.codebook.num_embeddings)
-    sums = torch.zeros(11, device=device, dtype=torch.float64)
+    sums = torch.zeros(12, device=device, dtype=torch.float64)
     student_counts = torch.zeros(k, device=device, dtype=torch.float64)
     teacher_counts = torch.zeros(k, device=device, dtype=torch.float64)
     student_sum = torch.zeros(dim, device=device, dtype=torch.float64)
@@ -571,6 +608,9 @@ def validate(model, loader, cfg, alpha, device, latent_transform=None):
         if latent_transform is not None:
             teacher_continuous = latent_transform(teacher_continuous)
         latent_mse = F.mse_loss(student.float(), teacher_continuous)
+        latent_mse_codebook = F.mse_loss(
+            student.float(), teacher_code.float()
+        )
         soft_kl = sparse_topk_kl(
             student,
             model.codebook,
@@ -602,6 +642,7 @@ def validate(model, loader, cfg, alpha, device, latent_transform=None):
                 float(F.mse_loss(pred_teacher.float(), target_teacher.float())),
                 float(F.mse_loss(pred_student.float(), target_student.float())),
                 float(F.mse_loss(pred_mixed.float(), target_mixed.float())),
+                float(latent_mse_codebook),
                 batch_size,
                 batch_size,
                 batch_size,
@@ -610,7 +651,7 @@ def validate(model, loader, cfg, alpha, device, latent_transform=None):
             device=device,
             dtype=torch.float64,
         ) * torch.tensor(
-            [batch_size] * 7 + [1, 1, 1, 1],
+            [batch_size] * 8 + [1, 1, 1, 1],
             device=device,
             dtype=torch.float64,
         )
@@ -639,8 +680,8 @@ def validate(model, loader, cfg, alpha, device, latent_transform=None):
         vector_count,
     ):
         all_reduce(value)
-    sample_count = sums[7].clamp_min(1.0)
-    averages = sums[:7] / sample_count
+    sample_count = sums[8].clamp_min(1.0)
+    averages = sums[:8] / sample_count
 
     def perplexity(counts):
         probs = counts / counts.sum().clamp_min(1.0)
@@ -659,6 +700,7 @@ def validate(model, loader, cfg, alpha, device, latent_transform=None):
     student_pred = float(averages[5])
     return {
         'validate/latent_mse': float(averages[0]),
+        'validate/latent_mse_codebook': float(averages[7]),
         'validate/soft_kl': float(averages[1]),
         'validate/token_agreement': float(averages[2]),
         'validate/top5_token_agreement': float(averages[3]),
@@ -779,6 +821,13 @@ def main():
                     'global_batch_size': (
                         world_size * int(cfg.data.train_batch_size_per_gpu)
                     ),
+                    'loss': {
+                        'latent_target': wrapper.latent_target,
+                        'prediction_source': wrapper.prediction_source,
+                        'soft_kl_weight': wrapper.soft_kl_weight,
+                        'latent_weight': float(cfg.loss.latent_weight),
+                        'prediction_weight': float(cfg.loss.prediction_weight),
+                    },
                     'latent_transform': (
                         {
                             'checkpoint': str(
@@ -836,6 +885,13 @@ def main():
     ) if world_size > 1 else wrapper
     total_epochs = sum(int(value) for value in cfg.phases.epochs)
     metrics_path = output_dir / 'metrics.jsonl'
+    # Gate the monotonic latent check on the metric that matches the trained
+    # objective; the other latent metric is still reported every epoch.
+    latent_gate_key = (
+        'validate/latent_mse_codebook'
+        if str(cfg.loss.get('latent_target', 'continuous')) == 'codebook'
+        else 'validate/latent_mse'
+    )
     previous_latent_mse = math.inf
 
     for epoch in range(start_epoch, total_epochs):
@@ -1003,7 +1059,7 @@ def main():
                 and validation['validate/perplexity_ratio']
                 >= float(cfg.gates.phase1_perplexity_ratio)
                 and validation['validate/student_active_codes'] > 1
-                and validation['validate/latent_mse'] <= previous_latent_mse
+                and validation[latent_gate_key] <= previous_latent_mse
             )
             gate_tensor = torch.tensor(int(gate_ok), device=device)
             if world_size > 1:
@@ -1029,7 +1085,7 @@ def main():
                     if world_size > 1:
                         dist.destroy_process_group()
                     raise SystemExit(2)
-        previous_latent_mse = validation['validate/latent_mse']
+        previous_latent_mse = validation[latent_gate_key]
 
     if rank == 0:
         final_ok = (

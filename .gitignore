@@ -235,3 +235,6 @@ uv.lock
 .stablewm/
 BACKUP_CHECKSUMS.md5
 *.orig
+
+# paper drafts stay local (public repo + double-blind review)
+paper_write/

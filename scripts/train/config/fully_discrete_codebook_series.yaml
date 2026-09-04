@@ -1,0 +1,106 @@
+# Fully-discrete (M5-style) single-task codebook-series experiment matrix.
+#
+# Extends the running k8192 fully-discrete runs (PushT + Cube) with the rest of
+# the codebook-quality conditions retrained under the fully-discrete loss:
+# k512, k2048 and k8192_rigid, on BOTH tasks.
+#
+#   PushT: codebooks and per-condition assignment caches already exist from
+#     codebook_quality_rigid_v1 — reused verbatim, so the only difference vs
+#     those runs is loss.latent_target=codebook.
+#   Cube: k512/k2048 codebooks do not exist yet and are trained first with the
+#     same latent_codebook.py recipe as the existing cube K8192 codebook
+#     (seed 3072, 100 epochs, 262144 latents); the rigid codebook is created
+#     from the cube K8192 codebook with create_rigid_codebook.py using the same
+#     transform settings as the PushT rigid condition (seed 20260826).
+#
+# Every condition keeps the P1/C1 single-task protocol: seed 3072, 16 epochs in
+# 4/10/2 phases, global batch 768 (4 GPUs x 192), bf16-mixed, identical model
+# size. PushT conditions additionally run the codebook-quality held-out
+# protocol (50-selection manifest + 200-test shards) for paired comparison
+# with the mixed-loss rows.
+
+experiment:
+  name: fully_discrete_codebook_series_v1
+  root: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/experiments/fully_discrete_codebook_series_v1
+  pusht_base_config: /vepfs-mlp2/c20250203/400120/stable-worldmodel/scripts/train/config/vq_lewm_joint_distillation_pusht_fully_discrete.yaml
+  cube_base_config: /vepfs-mlp2/c20250203/400120/stable-worldmodel/scripts/train/config/vq_lewm_joint_distillation_cube_fully_discrete.yaml
+  # Wait for this orchestrator's status.txt to say 'complete' before touching GPUs.
+  wait_status: /vepfs-mlp2/c20250203/400120/stable-worldmodel/logs/single_task_fully_discrete_gpu0123/status.txt
+
+compute:
+  devices: [0, 1, 2, 3]
+  nproc_per_node: 4
+  batch_size_per_gpu: 192
+  cpu_workers_total: 108
+  codebook_workers: 48
+
+pusht:
+  heldout_manifest_dir: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/evaluation_manifests/codebook_quality_rigid_v1
+  conditions:
+    k512_fully_discrete:
+      num_embeddings: 512
+      codebook_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat_codebook
+      base_teacher_cache: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/distillation_cache/lewm_pusht_seed3072
+      cache_dir: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/experiments/codebook_quality_rigid_v1/caches/k512_original
+      transform_mode: none
+    k2048_fully_discrete:
+      num_embeddings: 2048
+      codebook_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat_codebook_k2048
+      base_teacher_cache: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/distillation_cache/lewm_pusht_seed3072
+      cache_dir: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/experiments/codebook_quality_rigid_v1/caches/k2048_original
+      transform_mode: none
+    k8192_rigid_fully_discrete:
+      num_embeddings: 8192
+      codebook_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat_codebook_k8192_rigid_seed20260826
+      base_teacher_cache: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/distillation_cache/lewm_pusht_seed3072
+      cache_dir: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/experiments/codebook_quality_rigid_v1/caches/k8192_rigid
+      transform_mode: rigid
+
+cube:
+  teacher_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_cube_compat
+  dataset: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/datasets/quentinll--lewm-cube/cube_single_expert.h5
+  base_teacher_cache: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/distillation_cache/lewm_cube_seed3072
+  source_codebook_for_rigid: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_cube_compat_codebook_k8192
+  codebook_prep:
+    k512:
+      num_embeddings: 512
+      output_model_name: official_lewm_cube_compat_codebook_k512
+    k2048:
+      num_embeddings: 2048
+      output_model_name: official_lewm_cube_compat_codebook_k2048
+  rigid:
+    seed: 20260826
+    translation_scale: 1.0
+    audit_samples: 512
+    output: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_cube_compat_codebook_k8192_rigid_seed20260826
+  conditions:
+    k512_fully_discrete:
+      num_embeddings: 512
+      codebook_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_cube_compat_codebook_k512
+      transform_mode: none
+    k2048_fully_discrete:
+      num_embeddings: 2048
+      codebook_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_cube_compat_codebook_k2048
+      transform_mode: none
+    k8192_rigid_fully_discrete:
+      num_embeddings: 8192
+      codebook_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_cube_compat_codebook_k8192_rigid_seed20260826
+      transform_mode: rigid
+
+evaluation:
+  num_eval: 50
+  seed: 42
+  stages: [phase1, phase2, final]
+  # Mixed-loss counterparts on the 200-task held-out protocol
+  # (docs/codebook_quality_and_rigid_transform_experiment_report.md).
+  heldout_baselines:
+    k512_original: 75.5
+    k2048_original: 74.0
+    k8192_original: 76.0
+    k8192_rigid: 80.5
+    prediction_only_no_sigreg: 3.5
+  pusht_eval_baselines:
+    official_continuous: 90.0
+  cube_eval_baselines:
+    official_continuous: 68.0
+    single_task_vq_mixed_k8192: 68.0

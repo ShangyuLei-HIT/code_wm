@@ -1,0 +1,173 @@
+# EVAL-ONLY variant of vq_lewm_joint_distillation_pusht_fully_discrete.yaml.
+#
+# Never launch this config through run_joint_distillation.py (it would retrain);
+# it exists so evaluate_joint_distillation.py can run the SAME selection +
+# held-out protocol as the codebook-quality / rigid-transform experiment:
+#   - stage selection on the fixed 50-start selection manifest (seed 42),
+#   - held-out 200-task evaluation (4 shards x 50, seed 4242) on the selected
+#     checkpoint,
+# producing paired comparisons against k512_original (75.5%), k2048_original
+# (74.0%), k8192_original (76.0%), k8192_rigid (80.5%) and the collapsed
+# prediction-only ablation (3.5%).
+#
+# Paths (teacher/codebook/cache/output_dir) MUST stay identical to the training
+# config; only the evaluation block differs.
+
+seed: 3072
+
+paths:
+  dataset_cache: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm
+  teacher_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat
+  student_init_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat
+  codebook_checkpoint: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/checkpoints/official_lewm_pusht_compat_codebook_k8192
+  cache_dir: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/distillation_cache/lewm_pusht_seed3072
+  output_dir: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/joint_distillation/lewm_pusht_k8192_fully_discrete_seed3072
+
+data:
+  dataset: galilai-group/lewm-pusht
+  train_split: 0.9
+  split_seed: 3072
+  num_steps: 4
+  frameskip: 5
+  img_size: 224
+  keys_to_load: [pixels, action]
+  cache_batch_size_per_gpu: 512
+  train_batch_size_per_gpu: 192
+  cpu_workers_total: 108
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+
+codebook:
+  num_embeddings: 8192
+  embedding_dim: 192
+  weight_key: teacher.weight
+  topk: 32
+  temperature: 1.0
+  distance_chunk_size: 2048
+
+wm:
+  history_size: 3
+  num_preds: 1
+
+model:
+  _target_: stable_worldmodel.wm.vq_lewm.JointDistillationLeWM
+  embedding_dim: ${codebook.embedding_dim}
+  num_embeddings: ${codebook.num_embeddings}
+  codebook_checkpoint: ${paths.codebook_checkpoint}
+  codebook_weight_key: ${codebook.weight_key}
+  student_encoder:
+    _target_: stable_pretraining.backbone.utils.vit_hf
+    size: tiny
+    patch_size: 14
+    image_size: ${data.img_size}
+    pretrained: false
+    use_mask_token: false
+  predictor:
+    _target_: stable_worldmodel.wm.lewm.module.Predictor
+    num_frames: ${wm.history_size}
+    input_dim: ${codebook.embedding_dim}
+    hidden_dim: ${codebook.embedding_dim}
+    output_dim: ${codebook.embedding_dim}
+    depth: 6
+    heads: 16
+    mlp_dim: 2048
+    dim_head: 64
+    dropout: 0.1
+    emb_dropout: 0.0
+  action_encoder:
+    _target_: stable_worldmodel.wm.lewm.module.Embedder
+    input_dim: 10
+    emb_dim: ${codebook.embedding_dim}
+  projector:
+    _target_: stable_worldmodel.wm.lewm.module.MLP
+    input_dim: ${codebook.embedding_dim}
+    output_dim: ${codebook.embedding_dim}
+    hidden_dim: 2048
+    norm_fn:
+      _target_: torch.nn.BatchNorm1d
+      _partial_: true
+  adapter:
+    _target_: torch.nn.Linear
+    in_features: ${codebook.embedding_dim}
+    out_features: ${codebook.embedding_dim}
+    bias: true
+  pred_proj:
+    _target_: stable_worldmodel.wm.lewm.module.MLP
+    input_dim: ${codebook.embedding_dim}
+    output_dim: ${codebook.embedding_dim}
+    hidden_dim: 2048
+    norm_fn:
+      _target_: torch.nn.BatchNorm1d
+      _partial_: true
+
+loss:
+  prediction_weight: 1.0
+  latent_weight: 1.0
+  soft_kl_weight: 0.1
+  latent_target: codebook
+  prediction_source: codebook
+
+optimizer:
+  type: AdamW
+  weight_decay: 1.0e-3
+  betas: [0.9, 0.999]
+
+phases:
+  epochs: [4, 10, 2]
+  phase1:
+    warmup_fraction: 0.05
+    encoder_lr: [1.0e-3, 1.0e-4]
+    predictor_lr: [1.0e-3, 1.0e-4]
+  phase2:
+    warmup_fraction: 0.01
+    encoder_lr: [1.0e-4, 1.0e-5]
+    predictor_lr: [1.0e-4, 5.0e-5]
+  phase3:
+    warmup_fraction: 0.0
+    encoder_lr: [1.0e-5, 1.0e-6]
+    predictor_lr: [5.0e-5, 5.0e-6]
+
+trainer:
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  log_every_n_steps: 10
+  resume: auto
+  benchmark: true
+
+gates:
+  enforce: false
+  phase1_token_agreement: 0.90
+  phase1_perplexity_ratio: 0.80
+  final_token_agreement: 0.95
+  final_perplexity_ratio: 0.80
+  final_prediction_gap_ratio: 0.10
+
+evaluation:
+  enabled: true
+  dataset_name: galilai-group/lewm-pusht
+  num_eval: 50
+  seed: 42
+  stages: [phase1, phase2, final]
+  selection_manifest: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/evaluation_manifests/codebook_quality_rigid_v1/pusht_selection_seed42_n50.json
+  test_manifests:
+    - /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/evaluation_manifests/codebook_quality_rigid_v1/pusht_test_seed4242_n200_shard00.json
+    - /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/evaluation_manifests/codebook_quality_rigid_v1/pusht_test_seed4242_n200_shard01.json
+    - /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/evaluation_manifests/codebook_quality_rigid_v1/pusht_test_seed4242_n200_shard02.json
+    - /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/evaluation_manifests/codebook_quality_rigid_v1/pusht_test_seed4242_n200_shard03.json
+  selection_video: false
+  heldout_video: false
+  output_root: /vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/joint_distillation/lewm_pusht_k8192_fully_discrete_seed3072/task_evaluation_heldout
+  # Held-out baselines from docs/codebook_quality_and_rigid_transform_experiment_report.md
+  baselines:
+    k512_original: 75.5
+    k2048_original: 74.0
+    k8192_original: 76.0
+    k8192_rigid: 80.5
+    prediction_only_no_sigreg: 3.5
+
+smoke:
+  enabled: false
+  train_samples: 1536
+  val_samples: 768
+  batches_per_epoch: 2
