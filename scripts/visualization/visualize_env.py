@@ -2,7 +2,9 @@ import os
 from pathlib import Path
 
 
-os.environ['MUJOCO_GL'] = 'glfw'
+# Respect a caller-provided backend (e.g. MUJOCO_GL=egl on headless nodes);
+# fall back to glfw as before.
+os.environ.setdefault('MUJOCO_GL', 'glfw')
 
 from collections import OrderedDict
 

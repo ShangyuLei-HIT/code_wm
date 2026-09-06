@@ -1,0 +1,38 @@
+{
+  "checkpoint": "/vepfs-mlp2/c20250203/400120/stable-worldmodel/.stablewm/multitask_distillation/pusht_tworoom_cube_m4_continuous_seed3072/task_evaluation/pusht",
+  "tasks": [
+    "pusht",
+    "tworoom",
+    "cube"
+  ],
+  "n_points": 996,
+  "latent_dim": 192,
+  "silhouette_raw": 0.14910010993480682,
+  "silhouette_pca2": 0.5356737375259399,
+  "silhouette_tsne2": 0.6637176275253296,
+  "knn_task_purity_k10_raw": 1.0,
+  "per_task_norm_mean": {
+    "pusht": 12.91115951538086,
+    "tworoom": 8.0726318359375,
+    "cube": 6.15769100189209
+  },
+  "centroid_distance": {
+    "pusht|tworoom": 9.098050117492676,
+    "pusht|cube": 7.455165386199951,
+    "tworoom|cube": 4.590274333953857
+  },
+  "cross_task_mixing_k10": {
+    "pusht": {
+      "mean_other_task_neighbor_fraction": 0.0,
+      "fully_mixed_fraction": 0.0
+    },
+    "tworoom": {
+      "mean_other_task_neighbor_fraction": 0.0,
+      "fully_mixed_fraction": 0.0
+    },
+    "cube": {
+      "mean_other_task_neighbor_fraction": 0.0,
+      "fully_mixed_fraction": 0.0
+    }
+  }
+}

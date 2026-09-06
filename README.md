@@ -14,6 +14,7 @@
 4. **隐空间坐标对齐是独立的收益来源。** M0 与 M2 的唯一差异是 Procrustes 对齐:双任务宏平均 80%→87%(+7pp),三任务 77.3%→82.0%(+4.7pp);收益集中于量化最困难的 PushT。对齐保持 token 分配 100% 不变。
 5. **码本质量是否影响模型质量,由训练目标的教师表示形式决定:教师表示全离散时,码本质量直接决定模型质量。** 把三项损失的教师表示全部换成码本向量 c_{y^T}(全离散目标)后,PushT held-out 成功率随码本容量单调上升:K512 17.5% → K2048 30.5% → K8192 62.0%,相邻差距约 3σ 与 7σ;纯码本轨迹的一步预测误差与成功率严格同序——量化误差直接进入学习目标并逐级放大。此前的混合目标(第一项以连续向量为目标)中三者集中在 74%–76%、不可分辨:连续目标缓冲了量化误差。该影响是任务相关的,Cube 在 K2048 后即接近上限;码本大小须按任务在闭环中实测。
 6. **推理时强制离散化不可行,训练时联合适配可行。** 对连续模型直接量化,成功率从 90% 降至 58%;递归量化进一步降至 24%;在训练阶段联合适配冻结码本可恢复至 78%。作为对照,无教师监督、无防坍塌正则的 prediction-only 训练把预测误差降至近零,成功率却只有 3.5%。
+7. **隐空间几何与控制成功率方向一致,对齐的收益同时体现在分区内几何质量与分区边界的干净程度。** 对 M0–M5 全部 10 个多任务 checkpoint 的隐空间可视化评测(状态网格 t-SNE、隐空间距离场、PushT 角度扫描、跨任务联合聚类)显示:对齐蒸馏模型(M2/M4/M5)的共享隐空间按任务完全分区(kNN 任务纯度 1.0)且各分区内位置拓扑完好;未对齐 M0 在三任务下分区模糊(Two-Room 21.2% 跨任务近邻);M3 三任务的 PushT 表示塌缩(latent 范数 0.1,vs M2 的 12.8),为 PushT 4% 的控制崩溃提供最直接的表示层证据。任务分区与码本级 I(token;task)=1 bit 相互印证:跨任务共享的是坐标系与几何质量,而非区域重叠。
 
 > **探索性结果的定位**:UOT 码本融合(零合并)为单 seed 探索;隐空间刚体变换 +4.5pp 的点估计未能在全离散重训中复现(−6.5pp,不显著),亦作为单 seed 线索,见实验部分末尾两节。
 
@@ -154,6 +155,24 @@ K8192 的量化误差最低,但有 1212 个码字在验证集中从未被激活:
 
 以上五图依次为:逐任务成功率矩阵、三种监督实例化的比较、双源对齐前后的指标、顺序 UOT 的零合并结果、三个单任务码本的质量。
 
+### 隐空间可视化:任务分区的几何证据
+
+对双/三任务全部 5 个共享模型(M0/M2/M3/M4/M5)的 final checkpoint 执行隐空间可视化评测:环境状态网格 t-SNE、隐空间 L2 距离场、PushT 角度 0→2π 扫描(圆拓扑检验)、真值 vs rollout 轨迹投影,以及把多任务状态网格隐变量放进同一投影与同一度量空间的**跨任务联合聚类**(silhouette、kNN 任务纯度@10、跨任务混合率)。全部推理在 CPU 上完成,与训练共存零干扰;协议与逐图观察见[隐空间可视化评测报告](docs/latent_space_visualization_results.md)。
+
+**跨任务联合聚类(三任务)**:对齐蒸馏模型(M2/M4/M5)三任务完全分区(纯度 1.0)且各分区内位置梯度完整——"分而不乱";未对齐 M0 加入第三任务后分区模糊(Two-Room 21.2% 跨任务近邻、PCA2 silhouette −0.07);M3 的 PushT 隐变量塌缩为原点附近范数 0.1 的微小子球(M2 为 12.8),其高 silhouette(0.44)只是"小球远离大云"的平凡可分,是 PushT 4% 控制崩溃的表示层证据。
+
+![三任务 M0 跨任务联合聚类:Two-Room 与 Cube 区域重叠,分区模糊](docs/assets/latent_space_vis/three_task/M0/cross_task/M0_cross_task_cluster.png)
+
+![三任务 M2 跨任务联合聚类:三任务完全分区,各分区内位置梯度完整](docs/assets/latent_space_vis/three_task/M2/cross_task/M2_cross_task_cluster.png)
+
+![三任务 M3 跨任务联合聚类:PushT 塌缩为原点附近的微小子球](docs/assets/latent_space_vis/three_task/M3/cross_task/M3_cross_task_cluster.png)
+
+**PushT 圆拓扑检验(角度 0→2π 扫描)**:M2 形成颜色沿环单调渐进的闭合圆环,M3 散落为色块混杂的簇;结合距离场(M2 近似同心单峰的度量式结构、M3 条带状非度量)与"两者 3 步短时程 rollout 均贴合真值",M3 的失效定位在长时程规划/度量结构而非局部预测——隐空间几何与 92% vs 4% 的控制差距方向一致。
+
+![三任务 M2 PushT 角度扫描:颜色单调渐进的闭合圆环](docs/assets/latent_space_vis/three_task/M2/pusht/M2_pusht_rotation_tsne.png)
+
+![三任务 M3 PushT 角度扫描:圆拓扑破碎为色块混杂的簇](docs/assets/latent_space_vis/three_task/M3/pusht/M3_pusht_rotation_tsne.png)
+
 ### 开放探索一:UOT 码本融合——"概念整合"的试验台
 
 人类整合新经验时,等价概念会被合并与泛化,而不是并列封存。我们追问:不同任务的码字若在统一坐标系中几何邻近、占用分布相容,是否对应同一状态概念、能否合并为共享码字。
@@ -217,4 +236,12 @@ scripts/train/run_fully_discrete_codebook_series.py      # 全离散码本系列
 
 关键配置:双任务 `scripts/train/config/multitask_vq_lewm_*.yaml`(M0/M2/M4/M5);三任务 `scripts/train/config/multitask_vq_lewm_three_tasks*.yaml` 与 `multitask_lewm_three_tasks_baseline.yaml`(M3)。三种监督实例化通过 `latent_target` / `prediction_source` / `token_weight` 三个开关切换,复用同一融合码本与蒸馏缓存。
 
-双/三任务完整实验报告见 [`docs/pusht_tworoom_alignment_codebook_fusion_results.md`](docs/pusht_tworoom_alignment_codebook_fusion_results.md) 与 [`docs/pusht_tworoom_cube_alignment_codebook_fusion_results.md`](docs/pusht_tworoom_cube_alignment_codebook_fusion_results.md),码本质量与刚体变换实验报告见 [`docs/codebook_quality_and_rigid_transform_experiment_report.md`](docs/codebook_quality_and_rigid_transform_experiment_report.md),全离散码本系列与离线量化对比报告见 [`docs/k512_k8192_codebook_quality_comparison_report.md`](docs/k512_k8192_codebook_quality_comparison_report.md)。
+隐空间可视化评测入口:
+
+```bash
+scripts/visualization/visualize_env.py                # 状态网格隐空间 t-SNE / L2 距离场 / PushT 角度扫描
+scripts/visualization/visualize_trajectories.py       # 真值 vs rollout 轨迹联合投影 + mp4
+scripts/visualization/visualize_multitask_latents.py  # 跨任务联合隐空间聚类 + silhouette/纯度/混合率指标
+```
+
+双/三任务完整实验报告见 [`docs/pusht_tworoom_alignment_codebook_fusion_results.md`](docs/pusht_tworoom_alignment_codebook_fusion_results.md) 与 [`docs/pusht_tworoom_cube_alignment_codebook_fusion_results.md`](docs/pusht_tworoom_cube_alignment_codebook_fusion_results.md),码本质量与刚体变换实验报告见 [`docs/codebook_quality_and_rigid_transform_experiment_report.md`](docs/codebook_quality_and_rigid_transform_experiment_report.md),全离散码本系列与离线量化对比报告见 [`docs/k512_k8192_codebook_quality_comparison_report.md`](docs/k512_k8192_codebook_quality_comparison_report.md),隐空间可视化评测报告见 [`docs/latent_space_visualization_results.md`](docs/latent_space_visualization_results.md)。

@@ -2,8 +2,8 @@
 
 > 文档状态：全部实验（C0/C1/M0/M2/M3 及追加的 M4/M5 消融）训练与三环境评测已完成，结果表已填入实测值。  
 > 创建日期：2026-08-29  
-> 最近更新：2026-08-31（补入 M0/M2/M3 实测结果与 M4/M5 教师表示消融）  
-> 原双任务报告：docs/pusht_tworoom_alignment_codebook_fusion_results.md（保持不变）
+> 最近更新：2026-08-31（补入 M0/M2/M3 实测结果与 M4/M5 教师表示消融）；2026-09-05（追加第 9 节隐空间可视化与跨任务聚类评测）；2026-09-06（第 9 节内嵌关键支撑图）  
+> 原双任务报告：docs/pusht_tworoom_alignment_codebook_fusion_results.md（含其第 12 节的两任务隐空间评测）
 
 ## 1. 结论先行
 
@@ -14,6 +14,7 @@
 - **M2（双源对齐 + 顺序 UOT）以 82.0% 宏平均领先所有三任务模型**，比 M0 未对齐负对照（77.3%）高 4.7 个百分点，比 M3 连续 baseline（52.0%）高 30.0 个百分点。M3 在 PushT 上几近崩溃（2/50 = 4%），是拉低其宏平均的主因。
 - 本轮顺序 UOT 在 2% QE 退化预算下 **未接受任何 merge（num_merges=0）**，因此 M2 的 K_shared=24576，与 M0 的码本规模相同。M2 相对 M0 的收益完全来自双源 Procrustes 空间对齐，而非码本压缩。
 - **M4/M5 教师表示消融**：在 M2 框架上替换第一项对齐目标与第三项动力学 teacher latent 的来源。M4（全部用教师连续向量 z^T，删除码本软 token 项）宏平均 81.3%，与 M2 基本持平（−0.7pp）；M5（全部用离散码本向量 c_{y^T}）宏平均 76.7%，明显低于 M2（−5.3pp）。这说明连续教师表示至少与 M2 混合方案相当，而全离散化会损失精度，主要体现在 PushT（M5 82% vs M2 92%）与 Cube（M5 64% vs M2 68%）。
+- **隐空间可视化与跨任务聚类**（2026-09-05 追加，见第 9 节）：M2/M4/M5 的共享隐空间按任务完全分区（kNN 纯度 1.0）且各分区内位置拓扑完好；未对齐 M0 加入 Cube 后分区模糊（Two-Room 21% 跨任务近邻）；M3 的 PushT latent 平均范数塌缩至 0.1（M2 为 12.8），是其 PushT 4% 控制崩溃最直接的表示层证据。
 
 Cube 的视觉 embedding / latent 空间是 192 维。官方 Cube checkpoint 配置中 predictor、projector、prediction head 和 action embedding 的表示宽度均为 192。Cube 原始动作是 5 维；frameskip=5 后，一个世界模型时间步拼接 5 个动作，因此 action encoder 的输入是 25 维。PushT 和 Two-Room 的 action block 均为 10 维。三任务共享模型将 10 维动作尾部补零到 25 维，再送入同一个 action encoder。
 
@@ -270,7 +271,49 @@ M0 与 M2 采用相同的三阶段调度、global batch、训练任务顺序和�
 - M4、M5 教师表示消融的完整训练与三环境评测：见第 2 节结果表
 - 三任务宏平均和统计结论：见第 1 节
 
-## 9. 运行状态（已完成）
+## 9. 隐空间可视化与跨任务聚类评测（2026-09-05 追加）
+
+对 M0/M2/M3/M4/M5 的 final checkpoint（`task_evaluation/<task>/` 每任务导出版）用 `scripts/visualization/` 执行隐空间评测：
+
+- **单任务视图**（每模型 × pusht/tworoom/cube）：env 状态网格（pusht/tworoom 20×20、cube 14×14）t-SNE 拓扑 + 隐空间距离热图（distmap）、PushT T 块角度扫描（圆拓扑检验）、数据集轨迹真值 vs 模型 rollout 预测的联合 PCA + mp4；
+- **跨任务联合聚类**：三任务状态网格隐变量（同一共享 encoder、per-task 导出的 encode 任务无关）合并后的联合 t-SNE/PCA 与定量聚类指标。
+
+完整协议、全部图表与逐图观察见 `docs/latent_space_visualization_results.md`；产物在 `docs/assets/latent_space_vis/three_task/<模型>/<任务>/` 与 `docs/assets/latent_space_vis/three_task/<模型>/cross_task/`。评测全程 CPU 推理（`nice -n 19`、每进程 ≤4 线程），仅 Cube 渲染的 EGL 上下文短暂使用 GPU 3，未干扰训练。
+
+### 9.1 跨任务聚类指标（raw 192 维隐空间，996 点 = 400+400+196 状态）
+
+| 模型 | silhouette | PCA2 silhouette | kNN 任务纯度@10 | 任务质心距离 | latent 范数（P/TR/Cube） | 跨任务混合@10 |
+|---|---:|---:|---:|---|---|---|
+| M0 | 0.021 | **−0.070** | 0.915 | 6.9 / 7.5 / 4.6 | 12.6 / 14.1 / 9.8 | **Two-Room 21.2%** |
+| M2 | 0.146 | 0.540 | 1.000 | 9.0 / 7.2 / 4.8 | 12.8 / 8.1 / 5.9 | 0 |
+| M3 | 0.440* | 0.427 | 0.979 | 4.0 / 12.7 / 13.3 | **0.1** / 18.7 / 13.3 | Two-Room 5.3% |
+| M4 | 0.149 | 0.536 | 1.000 | 9.1 / 7.5 / 4.6 | 12.9 / 8.1 / 6.2 | 0 |
+| M5 | 0.157 | 0.555 | 1.000 | 8.7 / 7.0 / 4.8 | 11.9 / 8.1 / 6.1 | 0 |
+
+\* M3 的高 silhouette 是塌缩伪影：PushT latent 塌缩为原点附近的微小点团，"小球远离大云"平凡可分，不代表好的聚类结构。
+
+### 9.2 与控制结果的对应
+
+- **M3 PushT 表示塌缩**：PushT latent 平均范数 0.1（两任务版 M3 尚有 9.7；M2 为 12.8），联合投影中 PushT 塌缩为无位置信息的微小球。这与 M3 训练后期 PushT validation prediction MSE 恶化到 0.2248、MPC 成功率 4% 完全对应，是三任务共享 + 混合 SIGReg 负迁移最直接的表示层证据。
+
+  ![三任务 M3 跨任务联合聚类（左：联合 t-SNE 按任务着色，★=任务质心；中：同一布局按任务内网格位置着色；右：联合 PCA）——PushT（蓝）塌缩为原点附近的微小子球（平均范数 0.1）](assets/latent_space_vis/three_task/M3/cross_task/M3_cross_task_cluster.png)
+
+- **M0 分区模糊**：未对齐 concat 加入 Cube 后，Two-Room 有 21.2% 跨任务近邻、PCA2 silhouette 为负（投影中 Two-Room 与 Cube 区域重叠）；对齐的 M2/M4/M5 则完全分区（k=10 零混合）且各分区内位置梯度完整。结合两任务报告（M0 分离度已偏低但未模糊），Procrustes 对齐的收益同时体现在"分区内几何质量"与"分区边界的干净程度"，与 M2−M0 = +4.7pp 宏平均方向一致。
+
+  ![三任务 M0 跨任务联合聚类：Two-Room（橙）与 Cube（绿）区域重叠（21.2% 跨任务近邻、PCA2 silhouette −0.070），分区边界模糊](assets/latent_space_vis/three_task/M0/cross_task/M0_cross_task_cluster.png)
+
+  ![三任务 M2 跨任务联合聚类（对照）：三任务完全分区（纯度 1.0），各分区内位置梯度完整](assets/latent_space_vis/three_task/M2/cross_task/M2_cross_task_cluster.png)
+- **与码本级结论一致**：学生隐空间的任务完全分区与教师 token 的 I(token;task)=1 bit（两/三任务报告第 7.3/5.2 节）相互印证——对齐让各任务分区几何更规整，但并未把不同任务的隐区域合并；跨任务共享的是坐标系与几何质量，而非区域重叠。
+- **单任务视图**：M2 的 PushT 距离场近似度量式同心结构、角度扫描呈颜色单调闭合环，M3 两者皆失；M3 的 3 步短时程 latent rollout 仍贴合真值（失效在长时程规划而非局部预测）。Cube 对所有模型的隐空间拓扑都最破碎（与 Cube 最难量化/控制一致），M2 的 goal-variation 分区内结构仍优于 M3。Two-Room 上 M2 将背景变色编码为流形平行镜像拷贝、M3 近似不变，均不影响控制。
+
+  ![三任务 M2 PushT 角度扫描（0→2π，颜色=角度）：颜色沿环单调渐进的闭合圆环，圆拓扑完好](assets/latent_space_vis/three_task/M2/pusht/M2_pusht_rotation_tsne.png)
+
+  ![三任务 M3 PushT 角度扫描：角度状态散落为色块混杂的簇，圆拓扑破碎](assets/latent_space_vis/three_task/M3/pusht/M3_pusht_rotation_tsne.png)
+- **两任务 → 三任务**：两任务 M2 的 PushT 网格 t-SNE 为单连通流形，三任务 M2 出现簇分裂但其 distmap/rotation 依然完好（判定为 t-SNE 伪影）——加入第三任务未损害 PushT 隐空间几何，与其 92% 成功率一致。
+
+评测实现：新增 `scripts/visualization/visualize_multitask_latents.py` 与 `scripts/visualization/configs/config_trajectories_multitask.yaml`；`visualize_env.py` 的 `MUJOCO_GL` 由硬编码改为 `setdefault`（支持无头 EGL，默认行为不变）。
+
+## 10. 运行状态（已完成）
 
 全部流水线已结束。基础 orchestrator（run_pusht_tworoom_cube_all_gpu012.sh，PID 3531921）于 2026-08-30 19:45:20 UTC 记录 all_three_task_experiments_complete，完成 C0/C1/M0/M2/M3 的训练与三环境评测。
 
@@ -291,7 +334,7 @@ M4、M5 均训练满 16 epochs，各自 weights_final.pt 与 task_evaluation/sum
 - M4/M5 阶段日志：logs/pusht_tworoom_cube_gpu0123/stages_m4_m5.log、status_m4_m5.txt
 - M4/M5 训练与评测日志：logs/pusht_tworoom_cube_gpu0123/{m4,m5}_{train,evaluation}.log
 
-## 10. 结果填写准则
+## 11. 结果填写准则
 
 完整实验结束后，只从 JSON/metadata 自动或人工核对填入：
 

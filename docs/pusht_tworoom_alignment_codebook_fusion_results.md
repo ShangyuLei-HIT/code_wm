@@ -45,6 +45,7 @@
 - UOT 数值求解成功收敛，但保守硬化门限接受了 **0 个合并对**；最终 K_shared=16384。因此本轮 M2 实际上是“对齐后的双码本拼接”，在功能上等价于原方案的 M1 上界，并没有证明紧凑共享码本融合有效。
 - **M4/M5 教师表示消融**：在 M2 框架上只替换三项损失中教师表示的来源。M4（全部用教师连续向量 z^T，删除软 token 项）宏平均 90%，是本轮全部两任务模型中最高——PushT 94% 超过官方连续 teacher P0 的 90%，Two-Room 86% 与 R0 持平；相对 M2 为 +4/+2 pp（宏平均 +3 pp）。M5（全部用离散码本向量 c_{y^T}）宏平均 85%，比 M2 低 2 pp，但仍高于 M0（80%）与 M3（52%）。
 - 连续 ≥ 混合 ≥ 离散的排序与三任务消融一致，但两任务设置下连续教师目标的优势更明显（三任务中 M4 与 M2 基本持平，−0.7 pp）。M4/M5 与 M2 的差值最多对应 3 个评测 episode，均为单 seed 点估计。
+- 隐空间可视化与跨任务聚类评测（2026-09-05 追加，见第 12 节）：对齐蒸馏模型（M2/M4/M5）的共享隐空间按任务完全分区且各分区内位置拓扑完好；未对齐 M0 分区指标全面偏低；M3 出现尺度失衡与 PushT 距离场非度量、角度环破碎等表示层失效先兆。
 - R0、R1、M0 已补齐；按要求不再单独运行 M1，因为零合并的 M2 已是 M1-equivalent。当前仍缺少多随机种子、非零融合容量—质量曲线，以及与 M2 严格对齐训练调度的 M3 复核。
 
 ## 2. 实验完成状态与范围
@@ -664,7 +665,47 @@ Epoch 7→8 出现明显表示空间重组：
 - M4：../.stablewm/multitask_distillation/pusht_tworoom_m4_continuous_seed3072/task_evaluation/summary.json
 - M5：../.stablewm/multitask_distillation/pusht_tworoom_m5_codebook_seed3072/task_evaluation/summary.json
 
-## 12. 原方案成功判据逐项判断
+## 12. 隐空间可视化与跨任务聚类评测（2026-09-05 追加）
+
+对 M0/M2/M3/M4/M5 的 final checkpoint（`task_evaluation/<task>/` 每任务导出版）用 `scripts/visualization/` 执行隐空间评测：
+
+- **单任务视图**（每模型 × pusht/tworoom）：env 状态网格（20×20）t-SNE 拓扑 + 隐空间 L2 距离热图（distmap）、PushT T 块角度 0→2π 扫描（圆拓扑检验）、数据集轨迹真值 vs 模型 rollout 预测的联合 PCA + mp4；
+- **跨任务联合聚类**：pusht+tworoom 状态网格隐变量（同一共享 encoder 编码）合并后的联合 t-SNE/PCA 与定量聚类指标。
+
+完整协议、全部图表与逐图观察见 `docs/latent_space_visualization_results.md`；产物在 `docs/assets/latent_space_vis/two_task/<模型>/<任务>/` 与 `docs/assets/latent_space_vis/two_task/<模型>/cross_task/`。评测全程 CPU 推理（`nice -n 19`、每进程 ≤4 线程），未占用训练资源。
+
+### 12.1 跨任务聚类指标（raw 192 维隐空间，800 点 = 2×400 状态）
+
+| 模型 | silhouette | PCA2 silhouette | kNN 任务纯度@10 | 任务质心距离 | latent 范数（PushT/Two-Room） | 跨任务混合@10 |
+|---|---:|---:|---:|---:|---|---|
+| M0 | 0.092 | 0.310 | 1.000 | 6.8 | 12.4 / 14.1 | ≈0 |
+| M2 | 0.335 | 0.687 | 1.000 | 10.9 | 12.6 / 10.9 | 0 |
+| M3 | 0.107 | 0.199 | 0.968 | 4.8 | 9.7 / 18.2 | Two-Room 6.4% |
+| M4 | 0.340 | 0.685 | 1.000 | 11.1 | 12.9 / 10.9 | 0 |
+| M5 | 0.342 | 0.695 | 1.000 | 10.6 | 11.6 / 10.9 | 0 |
+
+### 12.2 与控制结果的对应
+
+- **对齐 → 干净的任务分区**：M2/M4/M5 的 k=10 邻域零跨任务混合、任务质心距离与 silhouette 全面高于未对齐 M0（10.9 vs 6.8、0.335 vs 0.092），且联合投影中每个任务分区内位置梯度完整（"分而不乱"）。这是 Procrustes 对齐除 PushT +12 pp 控制收益外的另一可测收益。M4/M5 与 M2 聚类结构几乎一致（同一对齐框架），三者控制差异不体现在任务分区层面。
+
+  ![M2 跨任务联合聚类（左：联合 t-SNE 按任务着色，★=任务质心；中：同一布局按任务内网格位置着色；右：联合 PCA）——两任务完全分区（纯度 1.0），各分区内位置梯度完整](assets/latent_space_vis/two_task/M2/cross_task/M2_cross_task_cluster.png)
+
+- **M0 分区弱化**：两任务下纯度仍 1.0 但分离度显著偏低；该趋势在三任务报告中发展为明显模糊（Two-Room 21% 跨任务近邻、PCA2 silhouette 为负），与"M0 两任务可用、加第三任务后宏平均落后 M2 4.7 pp"的方向一致。
+
+  ![M0 跨任务联合聚类：两任务下仍可分，但 silhouette（0.092）与任务质心距离（6.8）显著低于 M2（0.335/10.9），分离度明显偏弱](assets/latent_space_vis/two_task/M0/cross_task/M0_cross_task_cluster.png)
+
+- **M3 的表示层先兆**：两任务 M3 无塌缩，但隐空间尺度失衡（PushT 9.7 vs Two-Room 18.2）、任务质心最近（4.8）、Two-Room 有 6.4% 跨任务混合；其 PushT 距离场呈条带状非度量结构、角度扫描圆环破碎成色块混杂的簇（M2 则为颜色单调的闭合圆环 + 以参考点为中心的近似同心距离场）。M3 的 3 步短时程 latent rollout 仍贴合真值——其 PushT 6% 失效定位在长时程规划/度量结构，而非局部预测。
+
+  ![M3 跨任务联合聚类：隐空间尺度失衡（PushT 范数 9.7 vs Two-Room 18.2）、任务质心最近（4.8），分离度弱于 M2](assets/latent_space_vis/two_task/M3/cross_task/M3_cross_task_cluster.png)
+
+  ![M3 PushT 角度扫描（0→2π，颜色=角度）：圆环破碎为色块混杂的簇，圆拓扑丢失](assets/latent_space_vis/two_task/M3/pusht/M3_pusht_rotation_tsne.png)
+
+  ![M2 PushT 角度扫描（对照）：颜色沿环单调渐进的闭合圆环，圆拓扑完好](assets/latent_space_vis/two_task/M2/pusht/M2_pusht_rotation_tsne.png)
+- **Two-Room 表示风格差异**：M2 将背景变色编码为流形的平行镜像拷贝（位置几何在两份中均保留），M3 对背景色近似不变（两 variation 点级交错）；两者控制均正常（84–98%），属表示风格差异而非优劣。
+
+评测实现：新增 `scripts/visualization/visualize_multitask_latents.py`（跨任务聚类 + 指标）与 `scripts/visualization/configs/config_trajectories_multitask.yaml`（多数据集联合轨迹投影）；`visualize_env.py` 的 `MUJOCO_GL` 由硬编码改为 `setdefault`（支持无头 EGL，默认行为不变）。
+
+## 13. 原方案成功判据逐项判断
 
 | 判据 | 本轮判断 | 说明 |
 |---|---|---|
@@ -678,7 +719,7 @@ Epoch 7→8 出现明显表示空间重组：
 | K 与性能跨随机种子稳定 | **未测试** | 仅 seed=3072 |
 | 容量—质量曲线可解释 | **未测试** | 固定硬门限下所有 UOT trial 均为 0 merges |
 
-## 13. 主要限制
+## 14. 主要限制
 
 1. **UOT 没有产生真正融合。** 最终 K=16384、任务 token 支持完全分离；M2 实际是 M1-equivalent。
 2. **仅一个训练随机种子。** R0/R1/M0 已补齐，50 episodes/任务给出了完整主控制矩阵，但不足以证明训练稳定性或 M2−M0 的统计显著性。M4/M5 同为单 seed：M4−M2 的 +3 pp 宏平均对应 3 个评测 episode、M5−M2 的 −2 pp 对应 2 个 episode，且两任务与三任务的 M4−M2 符号不一致（+3 pp vs −0.7 pp），跨设置外推需谨慎。
@@ -690,7 +731,7 @@ Epoch 7→8 出现明显表示空间重组：
 8. **单任务码本质量不对称。** PushT test relative L2=20.62%，明显高于 Two-Room 的 7.70%。
 9. **峰值显存记录不完整。** R1 最终 epoch 记录约 24.62 GiB 峰值；M0/M2/M3 没有统一持久化同口径峰值曲线，故不做正式显存横向比较。
 
-## 14. 建议的下一轮实验
+## 15. 建议的下一轮实验
 
 按优先级建议：
 
@@ -723,7 +764,7 @@ Epoch 7→8 出现明显表示空间重组：
    - M4 在两任务下超过 M2 +3 pp、在三任务下低于 M2 0.7 pp；至少 3 个训练 seed 复核两种设置下 M2/M4/M5 的排序；
    - 检查任务数量、每任务数据量与码本量化难度（PushT 相对误差约 20.6%、Two-Room 约 7.7%）是否调制连续教师目标的优势。
 
-## 15. 产物索引
+## 16. 产物索引
 
 ### 配置与入口
 
@@ -797,7 +838,7 @@ Epoch 7→8 出现明显表示空间重组：
 - stages_m4_m5.log
 - orchestrator.log
 
-## 16. 最终结论
+## 17. 最终结论
 
 补齐 R0、R1、M0 后，主控制矩阵已经闭合（独立 M1 按要求不运行，零合并 M2 作为 M1-equivalent）。R0 是官网下载并本地兼容化的官方 Two-Room checkpoint，不是本地重训模型；R1 的 K=8192 码本则由冻结 R0 encoder 提取的 Two-Room latent 训练得到。R0=86%、R1 最佳阶段=84%，说明 Two-Room 离散化控制损失为 2 pp，明显小于 PushT 的 P0→P1 12 pp。
 
