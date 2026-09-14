@@ -157,6 +157,24 @@ K8192 的量化误差最低,但有 1212 个码字在验证集中从未被激活:
 
 以上五图依次为:逐任务成功率矩阵、三种监督实例化的比较、双源对齐前后的指标、顺序 UOT 的零合并结果、三个单任务码本的质量。
 
+### 六任务扩展:PushT × Two-Room × Cube × Scene × Reacher × HumanoidMaze
+
+六任务实验已完成（训练 seed=3072；MPC seed=42；每任务 50 个固定起点）。M2 使用五源 Similarity Procrustes 对齐和顺序 UOT，M0 是未对齐码本 concat，M3 是连续 baseline，M4/M5 是教师表示消融。
+
+| 模型 | PushT | Two-Room | Cube | Scene | Reacher | HumanoidMaze | 六任务宏平均 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| M0 未对齐 concat | 58% | 88% | 70% | 60% | 88% | 88% | 75.3% |
+| **M2 对齐 + 顺序 UOT** | **88%** | **90%** | **70%** | 54% | **92%** | **88%** | **80.3%** |
+| M3 连续 baseline | 2% | 92% | 60% | 52% | 6% | 88% | 50.0% |
+| M4 全连续教师 | 86% | 88% | 70% | **62%** | **94%** | 82% | **80.3%** |
+| M5 全离散码本教师 | 76% | **90%** | 70% | 60% | 92% | 86% | 79.0% |
+
+M2 比 M0 提升 **+5.0pp**，比 M3 提升 **+30.3pp**；M4 与 M2 持平，M5 比 M2 低 1.3pp。M3 在 PushT（2%）和 Reacher（6%）上明显崩溃。顺序 UOT 五个阶段均为 0 merge，最终共享码本为 K=49,152（6×K8192），因此 M2 的收益来自坐标对齐和蒸馏约束，而不是码本压缩。
+
+![六任务 MPC 成功率矩阵](docs/assets/pusht_tworoom_cube_scene_reacher_humanoidmaze_fusion/six_task_success_matrix.png)
+
+完整的对齐指标、动作维度、训练协议、产物路径和逐项结果见[六任务实验报告](docs/pusht_tworoom_cube_scene_reacher_humanoidmaze_alignment_codebook_fusion_results.md)。
+
 ### 隐空间可视化:任务分区的几何证据
 
 对双/三任务全部 5 个共享模型(M0/M2/M3/M4/M5)的 final checkpoint 执行隐空间可视化评测:环境状态网格 t-SNE、隐空间 L2 距离场、PushT 角度 0→2π 扫描(圆拓扑检验)、真值 vs rollout 轨迹投影,以及把多任务状态网格隐变量放进同一投影与同一度量空间的**跨任务联合聚类**(silhouette、kNN 任务纯度@10、跨任务混合率)。全部推理在 CPU 上完成,与训练共存零干扰;协议与逐图观察见[隐空间可视化评测报告](docs/latent_space_visualization_results.md)。
