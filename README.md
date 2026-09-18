@@ -71,6 +71,8 @@ L = 1.0·L_pred(教师源 r^T 的 teacher forcing)  +  1.0·L_latent(MSE 到 r^T
 | M0 | 多任务 | 多教师蒸馏,码本**直接拼接**(不对齐) | 对照:消融"有无跨任务对齐" |
 | M3 | 多任务 | 原生连续多任务:无教师、无对齐、无码本 | 对照:单体基线 |
 
+> "官方"(官方连续教师 / P0/R0/C0)指上游 [galilai-group/stable-worldmodel](https://github.com/galilai-group/stable-worldmodel) 项目作者发布的原始单任务模型,见文末[致谢](#致谢-acknowledgements)。
+
 > 实现上 `MultiTaskObjective` 提供三个开关:`latent_target` ∈ {continuous, codebook}、`prediction_source` ∈ {continuous, codebook}、`token_weight`;默认值对应混合版 M2,M4 = {continuous, continuous, 0},M5 = {codebook, codebook, 0.1}。三种实例化复用同一融合码本与缓存,教师信号全部处于对齐后参考系——M2/M4/M5 之间唯一受控差异是教师监督的表示形式。
 > **M0 与 M2 的唯一差异为 Procrustes 坐标对齐这一步骤**,网络规模、码本容量、三阶段调度、GPU 数、global batch、数据划分与随机种子均严格一致——这构成判断对齐作用的受控证据。
 
@@ -265,3 +267,41 @@ scripts/visualization/visualize_multitask_latents.py  # 跨任务联合隐空间
 ```
 
 双/三任务完整实验报告见 [`docs/pusht_tworoom_alignment_codebook_fusion_results.md`](docs/pusht_tworoom_alignment_codebook_fusion_results.md) 与 [`docs/pusht_tworoom_cube_alignment_codebook_fusion_results.md`](docs/pusht_tworoom_cube_alignment_codebook_fusion_results.md),码本质量与刚体变换实验报告见 [`docs/codebook_quality_and_rigid_transform_experiment_report.md`](docs/codebook_quality_and_rigid_transform_experiment_report.md),全离散码本系列与离线量化对比报告见 [`docs/k512_k8192_codebook_quality_comparison_report.md`](docs/k512_k8192_codebook_quality_comparison_report.md),隐空间可视化评测报告见 [`docs/latent_space_visualization_results.md`](docs/latent_space_visualization_results.md)。
+
+---
+
+## 致谢 (Acknowledgements)
+
+本代码库构建于 [stable-worldmodel](https://github.com/galilai-group/stable-worldmodel) 之上——GalilAI-group 发布的 MIT 许可开源世界模型研究平台(Maes et al., [arXiv:2605.21800](https://arxiv.org/abs/2605.21800))。本项目复用了该平台的环境管理、数据管线、规划与闭环评估基础设施(`stable_worldmodel/` 包);"官方连续教师"(P0/R0/C0 等 "Released" checkpoint)亦为该项目作者发布。本项目的贡献为:冻结离散码本构建、Similarity Procrustes 跨任务隐空间对齐、渐进式多任务整合蒸馏(`scripts/` 下的对齐 / 蒸馏 / 评测脚本)及相关分析。感谢 stable-worldmodel 作者以 MIT 许可开源其代码。
+
+## 许可证 (License)
+
+本仓库以 MIT 许可证发布,见 [`LICENSE`](./LICENSE)。其中按 MIT 许可证要求保留上游 `Copyright (c) 2026 GalilAI-group` 的版权与许可声明;本仓库新增的修改与代码同样以 MIT 提供。
+
+## 引用 (Citation)
+
+若本工作对你有帮助,请引用(本项目的论文信息待发布后补充):
+
+```bibtex
+@article{lei2026codewm,
+  title   = {从任务专家到共享世界模型: 经验整合与统一隐空间},
+  author  = {Lei, Shangyu},
+  journal = {arXiv preprint},
+  year    = {2026},
+  note    = {to appear}
+}
+```
+
+若你使用了 stable-worldmodel 的组件(环境、数据管线、规划、评估),请同时引用其平台论文:
+
+```bibtex
+@misc{maes_lld2026swm,
+  title         = {stable-worldmodel: A Platform for Reproducible World Modeling Research and Evaluation},
+  author        = {Lucas Maes and Quentin Le Lidec and Luiz Facury and Nassim Massaudi and Ayush Chaurasia and Francesco Capuano and Richard Gao and Taj Gillin and Dan Haramati and Damien Scieur and Yann LeCun and Randall Balestriero},
+  year          = {2026},
+  eprint        = {2605.21800},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.LG},
+  url           = {https://arxiv.org/abs/2605.21800}
+}
+```
