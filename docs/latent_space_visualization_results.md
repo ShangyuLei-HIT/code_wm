@@ -92,7 +92,7 @@
 
 单任务视图（第 4 节）之外，追加**跨任务联合聚类**评测：把同一共享模型的多个任务隐变量放进同一投影与同一度量空间，检验共享表示是否/如何按任务分区。产物位于 `docs/assets/latent_space_vis/<group>/<MODEL>/cross_task/`：
 
-- `<MODEL>_cross_task_cluster.{pdf,png}`：三面板——① 各任务状态网格隐变量合并后的联合 t-SNE（按任务着色，★=任务质心）；② 同一 t-SNE 布局按任务内归一化网格位置着色（检查各分区内部拓扑）；③ 联合 PCA（全局结构下任务间距）
+- `<MODEL>_cross_task_cluster.{pdf,png}`：三面板，图题标明模型编号与角色（如 `M2 · aligned codebook distillation`）——① 各任务状态网格隐变量合并后的联合 t-SNE（按任务着色，★=任务质心）；② 同一 t-SNE 布局按任务内归一化网格位置着色（检查各分区内部拓扑）；③ 联合 PCA（全局结构下任务间距）
 - `<MODEL>_cross_task_cluster_metrics.json`：raw 192 维空间的定量指标
 - `<MODEL>_cross_task_traj_tsne.pdf` / `<MODEL>_cross_task_traj.mp4`：三任务各 4 条专家轨迹真值 + 各自任务条件 rollout 预测的联合 t-SNE
 

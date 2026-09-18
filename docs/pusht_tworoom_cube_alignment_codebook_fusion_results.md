@@ -294,7 +294,7 @@ M0 与 M2 采用相同的三阶段调度、global batch、训练任务顺序和�
 
 ### 9.2 与控制结果的对应
 
-- **M3 PushT 表示塌缩**：PushT latent 平均范数 0.1（两任务版 M3 尚有 9.7；M2 为 12.8），联合投影中 PushT 塌缩为无位置信息的微小球。这与 M3 训练后期 PushT validation prediction MSE 恶化到 0.2248、MPC 成功率 4% 完全对应，是三任务共享 + 混合 SIGReg 负迁移最直接的表示层证据。
+- **M3 PushT 表示塌缩**：PushT latent 平均范数 0.1（两任务版 M3 尚有 9.7；M2 为 12.8），联合投影中 PushT 塌缩为无位置信息的微小球。注意三任务 M3 的 PushT validation prediction MSE 并不发散（最终约 1.1e-4），但 MPC 成功率只有 4%——低预测误差与控制失败并存，latent 塌缩本身才是表示层证据。training MSE 恶化到 0.2248 的是两任务版 M3（见 `pusht_tworoom_alignment_codebook_fusion_results.md`），两个 run 的数字不要混用。
 
   ![三任务 M3 跨任务联合聚类（左：联合 t-SNE 按任务着色，★=任务质心；中：同一布局按任务内网格位置着色；右：联合 PCA）——PushT（蓝）塌缩为原点附近的微小子球（平均范数 0.1）](assets/latent_space_vis/three_task/M3/cross_task/M3_cross_task_cluster.png)
 

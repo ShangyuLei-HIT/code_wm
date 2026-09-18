@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import json
 import math
 import os
 import random
+import re
+import shutil
+import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import hydra
@@ -26,6 +32,15 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from stable_worldmodel.data import column_normalizer
 from stable_worldmodel.wm.loss import SIGReg
 
+SIGREG_MODES = ('shared', 'per_task', 'none')
+
+MATCHED_INT_FIELDS = (
+    'expected_optimizer_steps',
+    'expected_per_task_batch',
+    'expected_world_size',
+    'expected_global_batch',
+)
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -33,7 +48,95 @@ def parse_args():
         '--config',
         default='scripts/train/config/multitask_lewm_baseline.yaml',
     )
+    parser.add_argument(
+        '--run_id',
+        default=None,
+        help='Run identifier recorded in run_manifest.json; defaults to the '
+        'config filename stem.',
+    )
+    parser.add_argument(
+        '--train_seed',
+        type=int,
+        default=None,
+        help='Override cfg.seed and rewrite the seed<old> token inside '
+        'cfg.paths.output_dir.',
+    )
+    parser.add_argument(
+        '--max_optimizer_steps',
+        type=int,
+        default=None,
+        help='Stop after this many optimizer steps; recorded as '
+        'cfg.trainer.max_optimizer_steps.',
+    )
+    parser.add_argument(
+        '--per_task_batch',
+        type=int,
+        default=None,
+        help='Override cfg.data.batch_size_per_task_per_gpu.',
+    )
+    parser.add_argument(
+        '--eval_manifest',
+        default=None,
+        help='Manifest path recorded as cfg.evaluation.eval_manifest.',
+    )
+    parser.add_argument(
+        '--save_config',
+        default=None,
+        help='Save the fully resolved config to this path before training.',
+    )
+    parser.add_argument(
+        '--sigreg_mode',
+        choices=SIGREG_MODES,
+        default=None,
+        help='Override cfg.loss.sigreg.mode (shared/per_task/none).',
+    )
+    parser.add_argument(
+        '--set',
+        action='append',
+        default=[],
+        metavar='KEY=VALUE',
+        help='Override an arbitrary config key, e.g. '
+        '--set trainer.epochs=8. Values are parsed as Python literals '
+        'with a raw-string fallback.',
+    )
     return parser.parse_args()
+
+
+def apply_overrides(cfg, overrides):
+    """Apply repeatable --set key.subkey=value overrides to the config."""
+    for item in overrides:
+        key, separator, raw = item.partition('=')
+        if not separator or not key:
+            raise ValueError(
+                f'invalid --set item {item!r}: expected KEY=VALUE'
+            )
+        try:
+            value = ast.literal_eval(raw)
+        except (ValueError, SyntaxError):
+            value = raw
+        with open_dict(cfg):
+            OmegaConf.update(cfg, key, value)
+    return cfg
+
+
+def apply_train_seed(cfg, seed):
+    """Set cfg.seed and rewrite the seed token in cfg.paths.output_dir.
+
+    Returns the effective training seed used.
+    """
+    old_seed = int(cfg.seed)
+    new_seed = int(seed)
+    with open_dict(cfg):
+        cfg.seed = new_seed
+        output_dir = str(cfg.paths.output_dir)
+        old_token = re.escape(f'seed{old_seed}')
+        pattern = re.compile(rf'(?<![0-9]){old_token}(?![0-9])')
+        if pattern.search(output_dir):
+            output_dir = pattern.sub(f'seed{new_seed}', output_dir)
+        else:
+            output_dir = f'{output_dir}_seed{new_seed}'
+        cfg.paths.output_dir = output_dir
+    return int(cfg.seed)
 
 
 def setup_distributed():
@@ -106,6 +209,30 @@ class NativeObjective(nn.Module):
         self.sigreg = SIGReg(**OmegaConf.to_container(cfg.loss.sigreg.kwargs))
         self.history = int(cfg.wm.history_size)
         self.sigreg_weight = float(cfg.loss.sigreg.weight)
+        self.sigreg_mode = str(
+            OmegaConf.select(cfg, 'loss.sigreg.mode', default='shared')
+        )
+        if self.sigreg_mode not in SIGREG_MODES:
+            raise ValueError(
+                f'loss.sigreg.mode must be one of {SIGREG_MODES}, '
+                f'got {self.sigreg_mode!r}'
+            )
+
+    def sigreg_shared(self, embedding):
+        return self.sigreg(embedding.transpose(0, 1))
+
+    def sigreg_per_task(self, embedding, task_ids):
+        per_task_losses = []
+        for task_id in task_ids.unique().tolist():
+            task_embedding = embedding[task_ids == task_id]
+            if task_embedding.size(0) < 2:
+                continue  # SIGReg needs at least 2 sequences per slice.
+            per_task_losses.append(
+                self.sigreg(task_embedding.transpose(0, 1))
+            )
+        if not per_task_losses:
+            return embedding.new_zeros(())
+        return torch.stack(per_task_losses).mean()
 
     def forward(self, batch):
         embedding = self.model.encode({'pixels': batch['pixels']})['emb']
@@ -116,7 +243,14 @@ class NativeObjective(nn.Module):
         )
         target = embedding[:, 1 : self.history + 1]
         prediction_loss = F.mse_loss(prediction, target)
-        regularization = self.sigreg(embedding.transpose(0, 1))
+        if self.sigreg_mode == 'none':
+            regularization = embedding.new_zeros(())
+        elif self.sigreg_mode == 'per_task':
+            regularization = self.sigreg_per_task(
+                embedding, batch['task_id'].reshape(-1)
+            )
+        else:
+            regularization = self.sigreg_shared(embedding)
         return {
             'prediction_loss': prediction_loss,
             'sigreg_loss': regularization,
@@ -296,8 +430,238 @@ def atomic_save(payload, path):
     os.replace(temporary, path)
 
 
+def utc_iso(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+
+def git_commit():
+    try:
+        repo_root = Path(__file__).resolve().parents[2]
+        result = subprocess.run(
+            ['git', '-C', str(repo_root), 'rev-parse', 'HEAD'],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        return result.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def relative_diff(expected, actual) -> float:
+    expected = float(expected)
+    actual = float(actual)
+    if expected == 0.0:
+        return 0.0 if actual == 0.0 else float('inf')
+    return abs(actual - expected) / abs(expected)
+
+
+def validate_matched_block(cfg):
+    """Fail fast on a malformed cfg.matched section (before training)."""
+    matched_cfg = OmegaConf.select(cfg, 'matched', default=None)
+    if matched_cfg is None:
+        return
+    reference = OmegaConf.select(matched_cfg, 'reference', default=None)
+    if not isinstance(reference, str) or not reference:
+        raise ValueError(
+            f'cfg.matched.reference must be a non-empty string, '
+            f'got {reference!r}'
+        )
+    for field in MATCHED_INT_FIELDS:
+        value = OmegaConf.select(matched_cfg, field, default=None)
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = None
+        if number is None or number != value or number < 1:
+            raise ValueError(
+                f'cfg.matched.{field} must be a positive int, '
+                f'got {value!r}'
+            )
+    tolerance = OmegaConf.select(matched_cfg, 'tolerance', default=None)
+    try:
+        tolerance_value = float(tolerance)
+    except (TypeError, ValueError):
+        tolerance_value = -1.0
+    if tolerance is None or tolerance_value != tolerance:
+        raise ValueError(
+            f'cfg.matched.tolerance must be a non-negative number, '
+            f'got {tolerance!r}'
+        )
+    if tolerance_value < 0.0:
+        raise ValueError(
+            f'cfg.matched.tolerance must be >= 0, got {tolerance!r}'
+        )
+    results_dir = OmegaConf.select(matched_cfg, 'results_dir', default=None)
+    if results_dir is not None and not isinstance(results_dir, str):
+        raise ValueError(
+            f'cfg.matched.results_dir must be a string or null, '
+            f'got {results_dir!r}'
+        )
+
+
+def save_resolved_config(cfg, path):
+    """Atomically save the fully resolved config to an arbitrary path."""
+    path = Path(path).expanduser()
+    if path.is_dir():
+        raise ValueError(
+            f'--save_config path {str(path)!r} is an existing directory'
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f'.{path.name}.tmp')
+    OmegaConf.save(cfg, temporary, resolve=True)
+    os.replace(temporary, path)
+    return path
+
+
+def write_matched_summary(cfg, manifest, output_dir, metrics_path):
+    """Compare achieved exposure against cfg.matched; never raises."""
+    matched_cfg = OmegaConf.select(cfg, 'matched', default=None)
+    if matched_cfg is None:
+        return None
+    num_tasks = len(cfg.tasks)
+    per_task_batch = int(manifest['per_task_batch'])
+    world_size = int(manifest['world_size'])
+    expected = {
+        'optimizer_steps': int(matched_cfg.expected_optimizer_steps),
+        'per_task_batch': int(matched_cfg.expected_per_task_batch),
+        'world_size': int(matched_cfg.expected_world_size),
+        'global_batch': int(matched_cfg.expected_global_batch),
+    }
+    actual = {
+        'optimizer_steps': int(manifest['optimizer_steps_completed']),
+        'per_task_batch': per_task_batch,
+        'world_size': world_size,
+        'global_batch': per_task_batch * num_tasks * world_size,
+    }
+    tolerance = float(matched_cfg.tolerance)
+    checks = {
+        name: {
+            'expected': expected[name],
+            'actual': actual[name],
+            'rel_diff': relative_diff(expected[name], actual[name]),
+            'within_tolerance': bool(
+                relative_diff(expected[name], actual[name]) <= tolerance
+            ),
+        }
+        for name in expected
+    }
+    summary = {
+        'run_id': manifest['run_id'],
+        'reference': str(matched_cfg.reference),
+        'matched': all(check['within_tolerance'] for check in checks.values()),
+        'tolerance': tolerance,
+        'checks': checks,
+        'actuals': {
+            'optimizer_steps': actual['optimizer_steps'],
+            'epochs_completed': int(manifest['epochs_completed']),
+            'per_task_batch': per_task_batch,
+            'world_size': world_size,
+            'num_tasks': num_tasks,
+            'global_batch': actual['global_batch'],
+            'max_optimizer_steps': manifest['max_optimizer_steps'],
+            'samples_per_task': manifest['samples_per_task'],
+        },
+        'train_seed': manifest['train_seed'],
+        'config_sha256': manifest['config_sha256'],
+        'written_at': utc_iso(time.time()),
+    }
+    text = json.dumps(summary, indent=2) + '\n'
+    (output_dir / 'summary.json').write_text(text)
+    results_dir = OmegaConf.select(matched_cfg, 'results_dir', default=None)
+    if isinstance(results_dir, str) and results_dir:
+        try:
+            results_path = Path(results_dir).expanduser()
+            results_path.mkdir(parents=True, exist_ok=True)
+            (results_path / 'summary.json').write_text(text)
+            if metrics_path.exists():
+                shutil.copy2(metrics_path, results_path / 'metrics.jsonl')
+        except OSError as error:
+            print(
+                f'WARNING: could not write matched results to '
+                f'{results_dir!r}: {error}',
+                flush=True,
+            )
+    print(
+        'matched exposure check: '
+        + json.dumps(
+            {
+                name: {
+                    'expected': check['expected'],
+                    'actual': check['actual'],
+                    'ok': check['within_tolerance'],
+                }
+                for name, check in checks.items()
+            },
+            sort_keys=True,
+        )
+        + f' -> matched={summary["matched"]}',
+        flush=True,
+    )
+    return summary
+
+
 def main():
-    cfg = OmegaConf.load(parse_args().config)
+    started_at = time.time()
+    args = parse_args()
+    cfg = OmegaConf.load(args.config)
+    run_id = args.run_id if args.run_id is not None else Path(args.config).stem
+    # Apply CLI overrides before anything heavy (CUDA, datasets, models).
+    if args.train_seed is not None:
+        old_seed = int(cfg.seed)
+        effective_seed = apply_train_seed(cfg, args.train_seed)
+        results_dir = OmegaConf.select(
+            cfg, 'matched.results_dir', default=None
+        )
+        if isinstance(results_dir, str) and f'seed{old_seed}' in results_dir:
+            with open_dict(cfg):
+                cfg.matched.results_dir = results_dir.replace(
+                    f'seed{old_seed}', f'seed{effective_seed}'
+                )
+    if args.max_optimizer_steps is not None:
+        if args.max_optimizer_steps < 1:
+            raise ValueError(
+                f'--max_optimizer_steps must be >= 1, '
+                f'got {args.max_optimizer_steps}'
+            )
+        with open_dict(cfg):
+            cfg.trainer.max_optimizer_steps = int(args.max_optimizer_steps)
+    if args.per_task_batch is not None:
+        if args.per_task_batch < 1:
+            raise ValueError(
+                f'--per_task_batch must be >= 1, got {args.per_task_batch}'
+            )
+        cfg.data.batch_size_per_task_per_gpu = int(args.per_task_batch)
+    if args.sigreg_mode is not None:
+        with open_dict(cfg):
+            cfg.loss.sigreg.mode = args.sigreg_mode
+    if args.eval_manifest is not None:
+        with open_dict(cfg):
+            cfg.evaluation.eval_manifest = args.eval_manifest
+    apply_overrides(cfg, args.set)
+    sigreg_mode = str(
+        OmegaConf.select(cfg, 'loss.sigreg.mode', default='shared')
+    )
+    if sigreg_mode not in SIGREG_MODES:
+        raise ValueError(
+            f'loss.sigreg.mode must be one of {SIGREG_MODES}, '
+            f'got {sigreg_mode!r}'
+        )
+    max_optimizer_steps = OmegaConf.select(
+        cfg, 'trainer.max_optimizer_steps', default=None
+    )
+    if max_optimizer_steps is not None:
+        max_optimizer_steps = int(max_optimizer_steps)
+        if max_optimizer_steps < 1:
+            raise ValueError(
+                f'trainer.max_optimizer_steps must be >= 1, '
+                f'got {max_optimizer_steps}'
+            )
+    eval_manifest = OmegaConf.select(
+        cfg, 'evaluation.eval_manifest', default=None
+    )
+    validate_matched_block(cfg)
     rank, world_size, local_rank, device = setup_distributed()
     seed = int(cfg.seed) + rank
     random.seed(seed)
@@ -330,22 +694,40 @@ def main():
         betas=tuple(cfg.optimizer.betas),
     )
     output_dir = Path(cfg.paths.output_dir).expanduser().resolve()
+    config_path = output_dir / 'config.yaml'
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
-        OmegaConf.save(cfg, output_dir / 'config.yaml')
+        OmegaConf.save(cfg, config_path)
+        config_text = config_path.read_text()
+        if args.save_config is not None:
+            saved_config_path = save_resolved_config(cfg, args.save_config)
+            config_text = saved_config_path.read_text()
+        manifest = {
+            'baseline': 'M3_native_continuous',
+            'uses_teacher': False,
+            'uses_alignment': False,
+            'uses_codebook': False,
+            'parameter_counts': parameter_counts(model),
+            'world_size': world_size,
+            'run_id': run_id,
+            'git_commit': git_commit(),
+            'config_sha256': hashlib.sha256(config_text.encode()).hexdigest(),
+            'train_seed': int(cfg.seed),
+            'sigreg_mode': sigreg_mode,
+            'per_task_batch': int(cfg.data.batch_size_per_task_per_gpu),
+            'max_optimizer_steps': max_optimizer_steps,
+            'optimizer_steps_completed': None,
+            'epochs_completed': None,
+            'samples_per_task': None,
+            'started_at': utc_iso(started_at),
+            'finished_at': None,
+            'gpu_hours': None,
+            'evaluation_manifest': (
+                str(eval_manifest) if eval_manifest is not None else None
+            ),
+        }
         (output_dir / 'run_manifest.json').write_text(
-            json.dumps(
-                {
-                    'baseline': 'M3_native_continuous',
-                    'uses_teacher': False,
-                    'uses_alignment': False,
-                    'uses_codebook': False,
-                    'parameter_counts': parameter_counts(model),
-                    'world_size': world_size,
-                },
-                indent=2,
-            )
-            + '\n'
+            json.dumps(manifest, indent=2) + '\n'
         )
     if world_size > 1:
         dist.barrier()
@@ -353,7 +735,14 @@ def main():
     if bool(cfg.smoke.enabled):
         steps_per_epoch = min(steps_per_epoch, int(cfg.smoke.batches_per_epoch))
     total_steps = int(cfg.trainer.epochs) * steps_per_epoch
+    # max_optimizer_steps only STOPS training early; the LR schedule keeps its
+    # natural horizon so a capped run never silently compresses the cosine
+    # (same semantics as multitask_vq_lewm_distillation.py).
     global_step = 0
+    epochs_completed = 0
+    num_tasks = len(cfg.tasks)
+    task_samples = torch.zeros(num_tasks, device=device, dtype=torch.int64)
+    stop_training = False
     metrics_path = output_dir / 'metrics.jsonl'
     for epoch in range(int(cfg.trainer.epochs)):
         for sampler in samplers:
@@ -385,6 +774,15 @@ def main():
                 objective.parameters(), float(cfg.trainer.gradient_clip_val)
             )
             optimizer.step()
+            counts = torch.bincount(
+                batch['task_id'].reshape(-1).long(), minlength=num_tasks
+            )
+            if counts.numel() != num_tasks:
+                raise ValueError(
+                    f'batch task_id outside 0..{num_tasks - 1} '
+                    f'(histogram length {counts.numel()})'
+                )
+            task_samples += counts
             totals += torch.tensor(
                 [
                     float(output['loss'].detach()),
@@ -395,6 +793,17 @@ def main():
                 dtype=torch.float64,
             )
             global_step += 1
+            if (
+                max_optimizer_steps is not None
+                and global_step >= max_optimizer_steps
+            ):
+                stop_training = True
+                break
+        if (
+            max_optimizer_steps is not None
+            and global_step >= max_optimizer_steps
+        ):
+            stop_training = True
         reduce_sum(totals)
         validation = {
             str(task.name): validate(
@@ -402,6 +811,7 @@ def main():
             )
             for index, task in enumerate(cfg.tasks)
         }
+        epochs_completed = epoch + 1
         denominator = max(1, steps_per_epoch * world_size)
         row = {
             'epoch': epoch + 1,
@@ -428,6 +838,15 @@ def main():
             )
         if world_size > 1:
             dist.barrier()
+        if stop_training:
+            break
+    reduce_sum(task_samples)
+    finished_at = time.time()
+    elapsed_seconds = finished_at - started_at
+    samples_per_task = {
+        str(task.name): int(count)
+        for task, count in zip(cfg.tasks, task_samples.tolist())
+    }
     if rank == 0:
         atomic_save(
             {
@@ -446,6 +865,20 @@ def main():
             },
             output_dir / 'weights_final.pt',
         )
+        manifest.update(
+            {
+                'optimizer_steps_completed': int(global_step),
+                'epochs_completed': int(epochs_completed),
+                'samples_per_task': samples_per_task,
+                'steps_per_epoch': int(steps_per_epoch),
+                'finished_at': utc_iso(finished_at),
+                'gpu_hours': elapsed_seconds * world_size / 3600.0,
+            }
+        )
+        (output_dir / 'run_manifest.json').write_text(
+            json.dumps(manifest, indent=2) + '\n'
+        )
+        write_matched_summary(cfg, manifest, output_dir, metrics_path)
         print(f'M3 training complete: {output_dir}', flush=True)
     if world_size > 1:
         dist.barrier()

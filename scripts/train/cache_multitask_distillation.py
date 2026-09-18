@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
+import math
 import os
 import random
 from pathlib import Path
@@ -14,7 +16,7 @@ import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
 import torch.distributed as dist
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 from stable_pretraining import data as dt
 from torch.utils.data import DataLoader, Dataset
 
@@ -37,7 +39,38 @@ def parse_args():
         default='scripts/train/config/multitask_vq_lewm.yaml',
     )
     parser.add_argument('--cpu-workers-total', type=int, default=None)
+    parser.add_argument(
+        '--set',
+        action='append',
+        default=[],
+        metavar='KEY=VALUE',
+        help='override a config key, e.g. --set codebook.temperature=2.0',
+    )
+    parser.add_argument(
+        '--save-config',
+        default=None,
+        metavar='PATH',
+        help='save the resolved config (after --set overrides) to this path',
+    )
     return parser.parse_args()
+
+
+def parse_override_value(raw: str):
+    try:
+        return ast.literal_eval(raw)
+    except (ValueError, SyntaxError):
+        return raw
+
+
+def apply_overrides(cfg, overrides: list[str]):
+    """Apply repeated ``--set key.subkey=value`` overrides to a config."""
+    for item in overrides:
+        key, separator, raw = item.partition('=')
+        if not separator or not key:
+            raise ValueError(f'--set expects KEY=VALUE, got {item!r}')
+        with open_dict(cfg):
+            OmegaConf.update(cfg, key, parse_override_value(raw), merge=True)
+    return cfg
 
 
 def setup_distributed() -> tuple[int, int, torch.device]:
@@ -163,16 +196,71 @@ def initialize_arrays(root: Path, metadata: dict) -> None:
         ).flush()
 
 
+# Metadata fields added after the first cache revision. Their values are
+# implied by alignment_checkpoint/alignment_sha256 (which older caches still
+# record), so they are compared only when the existing cache declares them.
+LEGACY_OPTIONAL_METADATA_FIELDS = ('alignment_mode', 'reference_task')
+
+
+def metadata_hash_payload(
+    metadata: dict, *, include_alignment_fields: bool
+) -> dict:
+    """The field set covered by ``metadata_sha256`` for one schema revision."""
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key != 'metadata_sha256'
+        and (
+            include_alignment_fields
+            or key not in LEGACY_OPTIONAL_METADATA_FIELDS
+        )
+    }
+
+
 def validate_existing(root: Path, expected: dict) -> bool:
     path = root / 'metadata.json'
     if not path.exists():
         return False
     actual = json.loads(path.read_text())
-    if actual != expected:
+    stored_sha = actual.get('metadata_sha256')
+    if stored_sha not in (
+        canonical_hash(
+            metadata_hash_payload(actual, include_alignment_fields=True)
+        ),
+        canonical_hash(
+            metadata_hash_payload(actual, include_alignment_fields=False)
+        ),
+    ):
+        raise RuntimeError(
+            'multitask cache metadata is corrupt: stored metadata_sha256 '
+            f'{stored_sha!r} matches neither the current nor the legacy '
+            f'schema field set of {path}'
+        )
+    differences = [
+        f'{field}: {actual[field]!r} != {expected.get(field)!r}'
+        for field in LEGACY_OPTIONAL_METADATA_FIELDS
+        if field in actual and actual[field] != expected.get(field)
+    ]
+    legacy_actual = metadata_hash_payload(
+        actual, include_alignment_fields=False
+    )
+    legacy_expected = metadata_hash_payload(
+        expected, include_alignment_fields=False
+    )
+    if legacy_actual != legacy_expected:
+        differing = sorted(
+            str(key)
+            for key in set(legacy_actual) | set(legacy_expected)
+            if legacy_actual.get(key) != legacy_expected.get(key)
+        )
+        differences.append(
+            'content-defining fields differ (' + ', '.join(differing) + ')'
+        )
+    if differences:
         raise RuntimeError(
             'multitask cache metadata mismatch: '
-            f'{actual.get("metadata_sha256")} != '
-            f'{expected.get("metadata_sha256")}'
+            f'{stored_sha} != {expected.get("metadata_sha256")} '
+            f'({"; ".join(differences)})'
         )
     for relative, spec in expected['files'].items():
         array = np.load(root / relative, mmap_mode='r')
@@ -189,6 +277,15 @@ def metadata_for(cfg, task_records: list[dict], codebook: torch.Tensor) -> dict:
         if fusion_metadata_path.exists()
         else None
     )
+    alignment_mode = str(cfg.alignment.get('mode', 'similarity') or 'similarity')
+    reference_task = str(cfg.tasks[int(cfg.alignment.reference_task_id)].name)
+    declared_reference = cfg.alignment.get('reference_task')
+    if declared_reference is not None and str(declared_reference) != reference_task:
+        raise ValueError(
+            f'alignment.reference_task {str(declared_reference)!r} conflicts with '
+            f'alignment.reference_task_id '
+            f'{int(cfg.alignment.reference_task_id)} (= {reference_task!r})'
+        )
     files = {}
     for record in task_records:
         files.update(
@@ -221,6 +318,8 @@ def metadata_for(cfg, task_records: list[dict], codebook: torch.Tensor) -> dict:
             Path(cfg.paths.alignment_checkpoint).expanduser().resolve()
         ),
         'alignment_sha256': sha256_file(cfg.paths.alignment_checkpoint),
+        'alignment_mode': alignment_mode,
+        'reference_task': reference_task,
         'resize': int(cfg.data.img_size),
         'num_steps': int(cfg.data.num_steps),
         'topk': int(cfg.codebook.topk),
@@ -229,6 +328,76 @@ def metadata_for(cfg, task_records: list[dict], codebook: torch.Tensor) -> dict:
     }
     metadata['metadata_sha256'] = canonical_hash(metadata)
     return metadata
+
+
+def reduce_split_stats(pieces: list[dict]) -> dict:
+    """Combine per-rank streaming statistics into exact split statistics."""
+    frames = sum(int(piece['frames']) for piece in pieces)
+    if frames <= 0:
+        raise ValueError('split produced no frames; refusing empty statistics')
+    norm_sum = sum(float(piece['norm_sum']) for piece in pieces)
+    squared_norm_sum = sum(
+        float(piece['squared_norm_sum']) for piece in pieces
+    )
+    top1 = np.concatenate(
+        [
+            np.asarray(piece['top1_sqdist'], dtype=np.float64)
+            for piece in pieces
+        ]
+    )
+    mean_norm = norm_sum / frames
+    variance = max(squared_norm_sum / frames - mean_norm**2, 0.0)
+    return {
+        'frames': frames,
+        'latent_norm_mean': mean_norm,
+        'latent_norm_std_from_second_moment': math.sqrt(variance),
+        'top1_sqdist_median': (
+            float(np.median(top1)) if top1.size else float('nan')
+        ),
+        'top1_sqdist_mean': (
+            float(top1.mean()) if top1.size else float('nan')
+        ),
+    }
+
+
+def build_cache_stats(cfg, codebook: torch.Tensor, task_stats: dict) -> dict:
+    temperature = float(cfg.codebook.temperature)
+    codebook_norms = codebook.detach().float().norm(dim=-1).double()
+    tasks_payload = {}
+    for name, splits in task_stats.items():
+        tasks_payload[str(name)] = {}
+        for split, entry in splits.items():
+            median = float(entry['top1_sqdist_median'])
+            mean = float(entry['top1_sqdist_mean'])
+            tasks_payload[str(name)][str(split)] = {
+                'frames': int(entry['frames']),
+                'latent_norm_mean': float(entry['latent_norm_mean']),
+                'latent_norm_std_from_second_moment': float(
+                    entry['latent_norm_std_from_second_moment']
+                ),
+                'top1_sqdist_median': median,
+                'top1_sqdist_mean': mean,
+                # Per-frame (sum over latent dims) squared L2 — NOT dim
+                # normalized like fused_codebook.quantization_mse.
+                'quantization_mse_per_frame': mean,
+                'temperature_effective': temperature / max(median, 1e-12),
+                'task_loss_scale_reference': mean,
+            }
+    return {
+        'temperature': temperature,
+        'codebook_norm_mean': float(codebook_norms.mean()),
+        'codebook_norm_std': float(codebook_norms.std(unbiased=False)),
+        'tasks': tasks_payload,
+    }
+
+
+def atomic_write_json(value: dict, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f'.{path.name}.tmp')
+    temporary.write_text(
+        json.dumps(value, indent=2, ensure_ascii=False) + '\n'
+    )
+    os.replace(temporary, path)
 
 
 def cache_task(
@@ -244,8 +413,16 @@ def cache_task(
     rank,
     world_size,
     device,
-) -> None:
+) -> dict[str, dict | None]:
+    """Fill one task's arrays and return per-split reduced statistics.
+
+    Every rank accumulates streaming statistics for its deterministic shard
+    (order is fixed because sharding and loader order are deterministic).
+    The top-1 squared distances are gathered in full so rank 0 can compute
+    the exact median/mean; non-zero ranks receive None placeholders.
+    """
     workers = int(cfg.data.cpu_workers_total) // world_size
+    reduced_stats: dict[str, dict | None] = {}
     for split, indices in splits.items():
         shard = CacheShard(dataset, indices, rank, world_size)
         loader = DataLoader(
@@ -269,6 +446,10 @@ def cache_task(
         probability_map = np.load(
             prefix / f'{split}_topk_probs.npy', mmap_mode='r+'
         )
+        frames = 0
+        norm_sum = torch.zeros((), dtype=torch.float64)
+        squared_norm_sum = torch.zeros((), dtype=torch.float64)
+        top1_chunks: list[np.ndarray] = []
         for batch_index, (pixels, positions) in enumerate(loader):
             pixels = pixels.to(device, non_blocking=True)
             with torch.autocast('cuda', dtype=torch.bfloat16):
@@ -280,6 +461,13 @@ def cache_task(
                 codebook,
                 k=int(cfg.codebook.topk),
                 chunk_size=int(cfg.codebook.distance_chunk_size),
+            )
+            norms = flat.norm(dim=-1)
+            frames += int(norms.numel())
+            norm_sum += norms.double().sum().cpu()
+            squared_norm_sum += norms.square().double().sum().cpu()
+            top1_chunks.append(
+                values[:, 0].detach().cpu().numpy().astype(np.float64)
             )
             probabilities = torch.softmax(
                 -values / float(cfg.codebook.temperature), dim=-1
@@ -309,14 +497,41 @@ def cache_task(
                 )
         for array in (latent_map, hard_map, index_map, probability_map):
             array.flush()
+        local_stats = {
+            'frames': frames,
+            'norm_sum': float(norm_sum),
+            'squared_norm_sum': float(squared_norm_sum),
+            'top1_sqdist': (
+                np.concatenate(top1_chunks)
+                if top1_chunks
+                else np.zeros(0, dtype=np.float64)
+            ),
+        }
+        if world_size > 1:
+            gathered: list = [None for _ in range(world_size)]
+            dist.all_gather_object(gathered, local_stats)
+            reduced_stats[split] = (
+                reduce_split_stats(gathered) if rank == 0 else None
+            )
+        else:
+            reduced_stats[split] = reduce_split_stats([local_stats])
+    return reduced_stats
 
 
 def main():
     args = parse_args()
     cfg = OmegaConf.load(args.config)
+    apply_overrides(cfg, args.set)
     if args.cpu_workers_total is not None:
         cfg.data.cpu_workers_total = max(0, int(args.cpu_workers_total))
     rank, world_size, device = setup_distributed()
+    if args.save_config is not None and rank == 0:
+        target = Path(args.save_config).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        OmegaConf.save(cfg, target)
+        print(f'Saved resolved config to {target}', flush=True)
+    if world_size > 1:
+        dist.barrier()
     seed = int(cfg.seed) + rank
     random.seed(seed)
     np.random.seed(seed)
@@ -396,17 +611,40 @@ def main():
     if status[0] == 'ready':
         if rank == 0:
             print(f'Validated existing cache: {root}', flush=True)
+            existing_metadata = json.loads(
+                (root / 'metadata.json').read_text()
+            )
+            legacy_fields = [
+                field
+                for field in LEGACY_OPTIONAL_METADATA_FIELDS
+                if field not in existing_metadata
+            ]
+            if legacy_fields:
+                print(
+                    f'NOTE: {root}/metadata.json predates '
+                    f'{", ".join(legacy_fields)}; content-defining fields '
+                    'matched, so the cache is reused unchanged',
+                    flush=True,
+                )
+            if not (root / 'cache_stats.json').exists():
+                print(
+                    f'WARNING: {root}/cache_stats.json is absent (cache built '
+                    'by an older script revision or interrupted); statistics '
+                    'were NOT recomputed for the validated cache',
+                    flush=True,
+                )
         if world_size > 1:
             dist.destroy_process_group()
         return
 
+    task_stats: dict[str, dict[str, dict]] = {}
     for task_id, (task, dataset, splits) in enumerate(
         zip(cfg.tasks, datasets, task_splits, strict=True)
     ):
         teacher = load_pretrained(task.teacher_checkpoint).to(device)
         teacher.requires_grad_(False)
         teacher.eval()
-        cache_task(
+        reduced = cache_task(
             cfg,
             task,
             task_id,
@@ -424,11 +662,24 @@ def main():
             world_size,
             device,
         )
+        if rank == 0:
+            for split, entry in reduced.items():
+                if entry is None:
+                    raise RuntimeError(
+                        f'rank 0 received no reduced statistics for '
+                        f'{task.name}/{split}'
+                    )
+            task_stats[str(task.name)] = reduced
         del teacher
         torch.cuda.empty_cache()
         if world_size > 1:
             dist.barrier()
     if rank == 0:
+        # cache_stats.json is written before metadata.json so that any cache
+        # declared complete by metadata.json always carries its statistics.
+        stats = build_cache_stats(cfg, codebook, task_stats)
+        atomic_write_json(stats, root / 'cache_stats.json')
+        print(f'Wrote cache statistics to {root}/cache_stats.json', flush=True)
         (root / 'metadata.json').write_text(
             json.dumps(metadata, indent=2, ensure_ascii=False) + '\n'
         )

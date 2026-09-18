@@ -15,6 +15,7 @@ Run from any directory; outputs are written to the current working dir:
         --checkpoint <task_export_dir> \
         --tasks pusht tworoom cube \
         --output-name M2_cross_task \
+        --model-desc "aligned codebook distillation" \
         --grid-size 20 --cube-grid-size 14 [--device cpu]
 
 Requires MUJOCO_GL=egl (headless) when the cube task is included.
@@ -72,6 +73,12 @@ TASK_COLORS = {
     'pusht': 'tab:blue',
     'tworoom': 'tab:orange',
     'cube': 'tab:green',
+}
+
+TASK_DISPLAY = {
+    'pusht': 'PushT',
+    'tworoom': 'TwoRoom',
+    'cube': 'Cube',
 }
 
 
@@ -143,7 +150,20 @@ def main():
     parser.add_argument('--device', default='cpu')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output-name', default='cross_task')
+    parser.add_argument(
+        '--model-label',
+        default=None,
+        help='experiment id shown in the figure suptitle (e.g. M0/M2/M3); '
+        'defaults to the leading token of --output-name',
+    )
+    parser.add_argument(
+        '--model-desc',
+        default=None,
+        help='short role description appended to the label '
+        '(e.g. "unaligned codebook concat")',
+    )
     args = parser.parse_args()
+    model_label = args.model_label or args.output_name.split('_')[0]
 
     all_latents, all_labels, all_gridnorm = [], [], []
     for task in args.tasks:
@@ -179,6 +199,7 @@ def main():
     centroid = {t: X[labels == t].mean(axis=0) for t in tasks}
     metrics = {
         'checkpoint': args.checkpoint,
+        'model_label': model_label,
         'tasks': tasks,
         'n_points': int(X.shape[0]),
         'latent_dim': int(X.shape[1]),
@@ -212,6 +233,17 @@ def main():
 
     # ---- plots ----
     fig, axes = plt.subplots(1, 3, figsize=(21, 7))
+    task_str = ' × '.join(TASK_DISPLAY.get(t, t) for t in tasks)
+    model_tag = (
+        f'{model_label} · {args.model_desc}'
+        if args.model_desc
+        else model_label
+    )
+    fig.suptitle(
+        f'{model_tag} — cross-task joint latent clustering ({task_str})',
+        fontsize=19,
+        fontweight='bold',
+    )
 
     ax = axes[0]
     for t in tasks:
@@ -226,7 +258,7 @@ def main():
             edgecolors='black', linewidths=1.2, zorder=5,
         )
     ax.set_title(
-        f'Joint t-SNE by task  |  silhouette(raw)='
+        f'(a) Joint t-SNE by task  |  silhouette(raw)='
         f"{metrics['silhouette_raw']:.3f}  purity@10="
         f"{metrics['knn_task_purity_k10_raw']:.3f}"
     )
@@ -249,7 +281,9 @@ def main():
             fontsize=13, fontweight='bold',
             bbox={'facecolor': 'white', 'alpha': 0.7, 'pad': 2},
         )
-    ax.set_title('Same t-SNE, colored by within-task grid position (R=x, G=y)')
+    ax.set_title(
+        '(b) Same t-SNE, colored by within-task grid position (R=x, G=y)'
+    )
     ax.set_xlabel('t-SNE dim 1')
     ax.set_ylabel('t-SNE dim 2')
     ax.grid(True, linestyle='--', alpha=0.3)
@@ -262,7 +296,7 @@ def main():
             s=8, alpha=0.6, color=TASK_COLORS[t], label=t,
         )
     ax.set_title(
-        f"Joint PCA by task  |  silhouette(pca2)="
+        f"(c) Joint PCA by task  |  silhouette(pca2)="
         f"{metrics['silhouette_pca2']:.3f}"
     )
     ax.set_xlabel('PCA dim 1')
@@ -270,7 +304,7 @@ def main():
     ax.legend(loc='best')
     ax.grid(True, linestyle='--', alpha=0.3)
 
-    plt.tight_layout()
+    plt.tight_layout(rect=(0, 0, 1, 0.96))
     for ext in ('pdf', 'png'):
         out = f'{args.output_name}_cluster.{ext}'
         plt.savefig(out, dpi=150)

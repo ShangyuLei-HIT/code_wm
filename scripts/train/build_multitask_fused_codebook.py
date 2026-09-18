@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import itertools
 import json
 import os
@@ -26,6 +27,20 @@ from stable_worldmodel.wm.vq_lewm.fused_codebook import (
 )
 
 
+def apply_overrides(cfg, overrides: list[str]):
+    """Apply dot-path overrides from --set KEY=VALUE (same helper as the
+    other pipeline scripts; value via ast.literal_eval with raw fallback)."""
+    for item in overrides:
+        if '=' not in item:
+            raise ValueError(f'--set expects KEY=VALUE, got {item!r}')
+        key, _, raw = item.partition('=')
+        try:
+            value = ast.literal_eval(raw)
+        except (ValueError, SyntaxError):
+            value = raw
+        OmegaConf.update(cfg, key, value, merge=True)
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -33,6 +48,13 @@ def parse_args():
         default='scripts/train/config/multitask_vq_lewm_three_tasks.yaml',
     )
     parser.add_argument('--method', choices=('concat', 'uot'), default=None)
+    parser.add_argument(
+        '--set',
+        action='append',
+        default=[],
+        metavar='KEY=VALUE',
+        help='dot-path config override, repeatable',
+    )
     return parser.parse_args()
 
 
@@ -305,6 +327,7 @@ def choose_uot_merge(
 def main():
     args = parse_args()
     cfg = OmegaConf.load(args.config)
+    apply_overrides(cfg, args.set)
     method = args.method or str(cfg.fusion.method)
     device = torch.device(str(cfg.fusion.device))
     order = task_order(cfg)
